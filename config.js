@@ -4,4 +4,4 @@
      supabaseAnonKey  der öffentliche Schlüssel: „anon public“ (eyJ…) oder „publishable“ (sb_publishable_…)
    NIE den service_role- bzw. secret-Schlüssel eintragen!
    Bleiben beide leer, ist die Nachbarschaft ausgeblendet und die App läuft wie 1.1. */
-window.GARTEN_CONFIG = { supabaseUrl: '', supabaseAnonKey: '' };
+window.GARTEN_CONFIG = { supabaseUrl: 'https://fmzsujdvrjmsgchfkodb.supabase.co', supabaseAnonKey: 'sb_publishable_m5qvaWDCBkx6YG9yvI1Bfg_yHLCLCyg' };
