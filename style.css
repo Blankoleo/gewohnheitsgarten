@@ -83,6 +83,28 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   text-shadow: 0 1px 0 rgba(30, 18, 46, .55), 0 0 14px rgba(30, 18, 46, .45);
 }
 
+/* ---------- Garten-Stufe ---------- */
+#stufe {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 7px auto 0;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(35, 25, 52, .4);
+  font-size: 12px;
+  color: var(--creme);
+  cursor: pointer;
+  text-shadow: 0 1px 0 rgba(30, 18, 46, .55);
+}
+#stufe[hidden] { display: none; }
+.stufe-zahl { font-weight: 700; letter-spacing: .02em; }
+.stufe-balken { width: 54px; height: 5px; border-radius: 3px; background: rgba(251, 236, 217, .2); overflow: hidden; }
+.stufe-balken span { display: block; height: 100%; background: #f6d58c; border-radius: 3px; }
+.stufe-weg { font-size: 11px; color: var(--creme-d); }
+
 /* ---------- Namensschilder ---------- */
 #schilder { position: absolute; inset: 0; pointer-events: none; }
 .schild {
@@ -115,6 +137,9 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 }
 .schild.gegossen::before { opacity: 1; box-shadow: 0 0 6px rgba(124, 196, 189, .8); }
 .schild.welk { color: var(--creme-d); }
+.schild.satt::before { opacity: .75; background: #f6d58c; }
+.schild.pause { color: #c9b8d8; font-style: italic; }
+.schild.pause::before { opacity: .7; background: var(--lila); }
 
 /* ---------- Leerer Garten ---------- */
 #leer {
@@ -235,6 +260,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   box-shadow: 0 -10px 30px rgba(10, 5, 20, .4);
 }
 #blatt.offen { transform: translate(-50%, 0); }
+#blatt, #stufe, .schild { -webkit-user-select: none; user-select: none; }
 .blatt-kopf { text-align: center; margin: 2px 0 14px; line-height: 0; }
 
 .feld {
@@ -291,6 +317,32 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 .meta { margin: 0 0 6px; font-size: 13px; color: var(--lila); }
 .stimmung { margin: 0; font-size: 14px; line-height: 1.4; }
 .frage { margin: 6px 0 0; width: 100%; font-size: 15px; }
+.woche { margin: 0 0 6px; font-size: 13px; color: var(--creme-d); }
+.stimmung.leise { margin-top: 8px; color: var(--creme-d); font-size: 13px; }
+
+/* ---------- Rhythmus ---------- */
+.rhythmus { margin: 4px 0 6px; }
+.rhythmus-hinweis { margin: 0 0 7px; font-size: 13px; color: var(--lila); }
+.rhythmen { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.chip {
+  border: 2px solid transparent;
+  background: #352b52;
+  border-radius: 9px;
+  padding: 8px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip[aria-pressed="true"] { border-color: var(--teal); background: #3e3463; }
+.pause-knopf { background: #33405a; }
+
+/* ---------- Stufen-Liste ---------- */
+.deko-liste { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 5px 10px; font-size: 13px; }
+.deko-liste li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.deko-liste li.zu { opacity: .45; }
+.deko-liste li.weg { opacity: .7; }
+.deko-lv { flex: none; width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; font-size: 11px; background: #3d3360; }
+.deko-liste li.da .deko-lv { background: #f6d58c; color: #3a2440; }
+.deko-hinweis { font-size: 11px; color: var(--creme-d); }
 
 /* ---------- Debug ---------- */
 #debug {

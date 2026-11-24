@@ -1,17 +1,20 @@
-/* Gewohnheits-Garten 1.0
-   Gewohnheiten als Pflanzen: jeden Tag gießen, zusehen wie alles wächst.
+/* Gewohnheits-Garten 1.1
+   Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
+   und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage.
 
    Debug (versteckt):
      ?tag=+3      simuliert 3 Tage später (auch ?tag=-1)
      ?zeit=21.5   feste Uhrzeit (Tag/Nacht testen)
+     ?level=12    Garten-Stufe nur zur Ansicht erzwingen (wird nicht gespeichert)
      ?debug       nur das Debug-Feld einblenden
-   Mit einem dieser Parameter erscheint oben links ein kleines Feld mit +1/-1 Tag und Uhrzeit.
+   Mit einem dieser Parameter erscheint oben links ein Feld mit Tag, Uhrzeit, Stufe,
+   „+1 Wo gießen“ (simuliert eine Woche Pflege für alle Pflanzen) und „Ereignis“.
 */
 'use strict';
 (function () {
 
-const VERSION = '1.0';
+const VERSION = '1.1';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -53,9 +56,14 @@ const $ = (id) => document.getElementById(id);
 
 /* ------------------------------------------------------------------ Debug / Zeit */
 const params = new URLSearchParams(location.search);
-const DEBUG = params.has('tag') || params.has('zeit') || params.has('debug');
+const DEBUG = params.has('tag') || params.has('zeit') || params.has('debug') || params.has('level');
 let dayOffset = parseInt((params.get('tag') || '0').trim(), 10) || 0; // "+3" kommt als " 3" an
 let hourOverride = null;
+let levelOverride = null;
+if (params.has('level')) {
+  const l = parseInt(params.get('level'), 10);
+  if (isFinite(l)) levelOverride = clamp(l, 0, 16);
+}
 if (params.has('zeit')) {
   const z = parseFloat(String(params.get('zeit')).replace(',', '.'));
   if (isFinite(z)) hourOverride = ((z % 24) + 24) % 24;
@@ -70,26 +78,47 @@ function currentHour() {
 
 /* ------------------------------------------------------------------ Daten
    Aufbau (für eine spätere "Nachbarschaft" vorbereitet):
-   garden  = öffentlich teilbar: nur Pflanzenart, Wachstum, Gießtage – keine Namen
-   privat  = bleibt auf dem Gerät: die Namen der Gewohnheiten (nach Pflanzen-ID)        */
+   garden  = öffentlich teilbar: Pflanzenart, Rhythmus, Wachstum, Gießtage, Pause,
+             Garten-Pflege (xp), Stufe und freigeschaltete Deko – keine Namen
+   privat  = bleibt auf dem Gerät: die Namen der Gewohnheiten (nach Pflanzen-ID)
+
+   Schema 2 (1.1): Pflanze = { id, species, plantedDay, lastWatered, growth,
+     goal (1|2|3|5|7 pro Woche), days: [Gießtage, letzte ~9 Wochen], paused (Tag|null), resumeDay }   */
 let state = null; // wird in init() geladen
 
 function freshState() {
-  return { schema: 1, garden: { id: uid(), plants: [] }, privat: { names: {} } };
+  return { schema: 2, garden: { id: uid(), plants: [], xp: 0, level: 0, deko: [] }, privat: { names: {} } };
+}
+function migratePlant(p) {
+  if (!isFinite(p.goal) || !GOALS.includes(p.goal)) p.goal = 7;           // 1.0: alles täglich
+  if (!Array.isArray(p.days)) p.days = p.lastWatered != null ? [p.lastWatered] : [];
+  if (p.paused === undefined) p.paused = null;
+  if (p.resumeDay === undefined) p.resumeDay = null;
+  if (!isFinite(p.growth)) p.growth = 0;
+  return p;
 }
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && s.schema === 1 && s.garden && Array.isArray(s.garden.plants)) {
+    if (s && (s.schema === 1 || s.schema === 2) && s.garden && Array.isArray(s.garden.plants)) {
       s.privat = s.privat || { names: {} };
       s.privat.names = s.privat.names || {};
-      s.garden.plants = s.garden.plants.filter((p) => p && SPECIES[p.species]);
+      s.garden.plants = s.garden.plants.filter((p) => p && SPECIES[p.species]).map(migratePlant);
+      if (s.schema === 1 || !isFinite(s.garden.xp)) {
+        // bisherige Pflege als Startguthaben für die Garten-Stufe
+        const n = s.garden.plants.length;
+        s.garden.xp = s.garden.plants.reduce((a, p) => a + p.growth, 0) / Math.sqrt(Math.max(1, n));
+      }
+      s.schema = 2;
       return s;
     }
   } catch (e) { /* kaputte Daten: neu anfangen */ }
   return freshState();
 }
 function saveState() {
+  const L = levelOfXp(state.garden.xp);
+  state.garden.level = L;
+  state.garden.deko = DEKO.filter((d) => d.lv <= L).map((d) => d.id);
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (e) { toast('Speichern hat leider nicht geklappt.'); }
 }
@@ -98,88 +127,184 @@ const nameOf = (p) => state.privat.names[p.id] || 'Pflanze';
 /** Öffentlicher Schnappschuss ohne private Namen – Grundlage für eine spätere Nachbarschaft. */
 function gardenSnapshot() {
   const t = today();
+  const L = gardenLevel(), vit = vitality(t);
   return {
     id: state.garden.id,
     day: t,
+    level: L,
+    xp: Math.round(state.garden.xp * 10) / 10,
+    vitality: Math.round(vit * 100) / 100,
+    deko: DEKO.filter((d) => d.lv <= L).map((d) => d.id),
+    visible: DEKO.filter((d) => d.lv <= effLevel(L, vit)).map((d) => d.id),
     plants: state.garden.plants.map((p) => ({
-      id: p.id, species: p.species, stage: stageOf(p.growth),
-      condition: condition(p, t), wateredToday: wateredToday(p, t)
+      id: p.id, species: p.species, goal: p.goal, stage: stageOf(p.growth),
+      growth: Math.round(p.growth * 10) / 10,
+      condition: condition(p, t), wateredToday: wateredToday(p, t),
+      week: weekCount(p, t), paused: p.paused != null
     }))
   };
 }
 
 /* ------------------------------------------------------------------ Pflanzenarten */
 const SPECIES = {
-  farn:        { name: 'Farn',        stages: ['Samen', 'Keim', 'Busch', 'Wedel', 'Voll'],        seed: [168, 136, 100], accent: [124, 184, 140] },
-  sonnenblume: { name: 'Sonnenblume', stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Volle Blüte'], seed: [96, 84, 76],    accent: [246, 196, 88] },
-  kaktus:      { name: 'Kaktus',      stages: ['Samen', 'Keim', 'Säule', 'Blüte', 'Voll'],        seed: [70, 58, 54],    accent: [236, 140, 170] },
-  kirschbaum:  { name: 'Kirschbaum',  stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Baum'],        seed: [160, 86, 74],   accent: [246, 176, 196] },
-  monstera:    { name: 'Monstera',    stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Voll'],        seed: [176, 144, 104], accent: [96, 160, 120] }
+  farn:        { name: 'Farn',        goal: 7, durst: 'durstig',  stages: ['Samen', 'Keim', 'Busch', 'Wedel', 'Voll'],        seed: [168, 136, 100], accent: [124, 184, 140] },
+  sonnenblume: { name: 'Sonnenblume', goal: 3, durst: 'mäßig durstig', stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Volle Blüte'], seed: [96, 84, 76],    accent: [246, 196, 88] },
+  kaktus:      { name: 'Kaktus',      goal: 1, durst: 'genügsam', stages: ['Samen', 'Keim', 'Säule', 'Blüte', 'Voll'],        seed: [70, 58, 54],    accent: [236, 140, 170] },
+  kirschbaum:  { name: 'Kirschbaum',  goal: 3, durst: 'mäßig durstig', stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Baum'],        seed: [160, 86, 74],   accent: [246, 176, 196] },
+  monstera:    { name: 'Monstera',    goal: 7, durst: 'durstig',  stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Voll'],        seed: [176, 144, 104], accent: [96, 160, 120] }
 };
 const SPECIES_ORDER = ['farn', 'sonnenblume', 'kaktus', 'kirschbaum', 'monstera'];
-const STAGE_MIN = [0, 2, 5, 10, 18]; // Gießtage bis zur Stufe
+const EXTRA_STAGES = ['Prächtig', 'Riesig', 'Legendär'];
+// Wachstumspunkte bis zur Stufe. 1 Punkt ≈ 1 Tag täglicher Pflege, also ~7 pro Woche bei jedem Rhythmus.
+// Prächtig nach ~5, Riesig nach ~9, Legendär nach ~16 Wochen Dranbleiben.
+const STAGE_MIN = [0, 2, 5, 10, 18, 35, 63, 112];
+const STAGE_MAX = STAGE_MIN.length - 1;
+const GOALS = [7, 5, 3, 2, 1];
+const GOAL_LABEL = { 7: 'täglich', 5: '5× pro Woche', 3: '3× pro Woche', 2: '2× pro Woche', 1: '1× pro Woche' };
+const GOAL_SHORT = { 7: 'täglich', 5: '5×', 3: '3×', 2: '2×', 1: '1×' };
+const GOAL_DAYS = { 7: [0, 1, 2, 3, 4, 5, 6], 5: [0, 1, 2, 3, 4], 3: [0, 2, 4], 2: [0, 3], 1: [0] }; // Mo=0 (Debug-Simulation)
+const stageName = (sp, st) => st <= 4 ? SPECIES[sp].stages[st] : EXTRA_STAGES[st - 5];
 
-function stageOf(g) { let s = 0; for (let i = 0; i < STAGE_MIN.length; i++) if (g >= STAGE_MIN[i]) s = i; return s; }
-function refDay(p) { return p.lastWatered != null ? p.lastWatered : p.plantedDay - 1; }
-function wateredToday(p, t = today()) { return p.lastWatered != null && p.lastWatered >= t; }
-function missedDays(p, t = today()) { return Math.max(0, t - refDay(p) - 1); }
-/** 0 = gesund, 1 = Blätter hängen (1–2 Tage verpasst), 2 = welk (3+ Tage) */
-function condition(p, t = today()) {
-  if (wateredToday(p, t)) return 0;
-  const m = missedDays(p, t);
-  return m >= 3 ? 2 : (m >= 1 ? 1 : 0);
+function stageOf(g) { let s = 0; for (let i = 0; i < STAGE_MIN.length; i++) if (g >= STAGE_MIN[i] - 1e-6) s = i; return s; }
+
+/* Wochen laufen Mo–So. Tag 0 (1.1.1970) war ein Donnerstag. */
+const weekday = (t) => ((t + 3) % 7 + 7) % 7;
+const weekStart = (t) => t - weekday(t);
+function weekCount(p, t = today()) { const w0 = weekStart(t); return p.days.filter((d) => d >= w0 && d <= t).length; }
+function refDay(p) {
+  let r = p.lastWatered != null ? p.lastWatered : p.plantedDay - 1;
+  if (p.resumeDay != null) r = Math.max(r, p.resumeDay - 1); // nach einer Pause zählt die Pause nicht
+  return r;
 }
-/** Gießen: einmal pro Tag. Nach langem Welken geht etwas Wachstum verloren, nie alles. */
-function water(p) {
-  const t = today();
+function wateredToday(p, t = today()) { return p.lastWatered != null && p.lastWatered >= t; }
+/* Faire Welk-Regel: Intervall = 7/Ziel Tage. Bis "grace" Tage seit dem letzten Gießen bleibt alles frisch
+   (täglich: 1, 5×: 3, 3×: 4, 2×: 5, 1×: 8). Danach hängt sie, nach weiteren "wiltSpan" Tagen welkt sie
+   (täglich: ab 4 Tagen, 3×: ab 7, 1×: ab 15). Wochenziel schon erfüllt -> immer frisch. Pause -> nie welk. */
+const grace = (g) => g >= 7 ? 1 : Math.ceil(7 / g) + 1;
+const wiltSpan = (g) => g >= 7 ? 3 : Math.max(3, Math.ceil(7 / g));
+function overdue(p, t = today()) { return (t - refDay(p)) - grace(p.goal); }
+/** 0 = frisch, 1 = Blätter hängen, 2 = welk */
+function condition(p, t = today()) {
+  if (p.paused != null) return 0;
+  if (wateredToday(p, t)) return 0;
+  if (p.goal < 7 && weekCount(p, t) >= p.goal) return 0;
+  const o = overdue(p, t);
+  if (o <= 0) return 0;
+  return o >= wiltSpan(p.goal) ? 2 : 1;
+}
+/** Braucht heute Wasser? (für den Gruß) */
+function thirsty(p, t = today()) {
+  if (p.paused != null || wateredToday(p, t)) return false;
+  return p.goal >= 7 || weekCount(p, t) < p.goal;
+}
+/** Gießen: einmal pro Tag. Wachstum pro Gießen = 7/Ziel, über dem Wochenziel nur ein kleiner Bonus.
+    Nach langem Welken geht etwas Wachstum verloren, nie mehr als 35 %. */
+function water(p, t = today()) {
   if (wateredToday(p, t)) return null;
-  const m = missedDays(p, t);
+  const c0 = condition(p, t);
+  const o = overdue(p, t), ws = wiltSpan(p.goal);
   const before = stageOf(p.growth);
+  const lvBefore = levelOfXp(state.garden.xp);
   let loss = 0;
-  if (m >= 3) {
-    loss = Math.min(Math.floor(p.growth * 0.35), m - 2);
+  if (c0 === 2 && o >= ws) {
+    loss = Math.min(Math.floor(p.growth * 0.35), o - ws + 1);
     p.growth -= loss;
   }
-  p.growth += 1;
+  const wc = weekCount(p, t);
+  const bonus = wc >= p.goal;
+  const gain = bonus ? 0.5 : 7 / p.goal;
+  p.growth += gain;
   p.lastWatered = t;
-  saveState();
-  return { revived: m >= 3, drooped: m >= 1 && m < 3, loss, grew: stageOf(p.growth) > before, stage: stageOf(p.growth) };
+  p.days.push(t);
+  p.days = p.days.filter((d) => d > t - 63);
+  state.garden.xp += gain / Math.sqrt(Math.max(1, state.garden.plants.length));
+  const lvAfter = levelOfXp(state.garden.xp);
+  return {
+    revived: c0 === 2, drooped: c0 === 1, loss, bonus,
+    grew: stageOf(p.growth) > before, stage: stageOf(p.growth),
+    levelUp: lvAfter > lvBefore ? lvAfter : 0,
+    weekDone: !bonus && wc + 1 === p.goal && p.goal < 7
+  };
 }
 
-/* ------------------------------------------------------------------ Pixel-Sprite-Baukasten */
-function Buf() {
-  this.w = SW; this.h = SH;
-  this.c = new Array(SW * SH).fill(null);
-  this.p = new Int16Array(SW * SH).fill(-1);
+/* ------------------------------------------------------------------ Garten-Stufe und Deko
+   Jedes Gießen gibt Pflege (7/Ziel, geteilt durch √Pflanzenzahl). So wird auch ein kleiner Garten
+   übertrieben, ein großer nur etwas schneller. Stufe L braucht 1,6·L^1,8 Pflege
+   (1 Pflanze täglich: Stufe 5 nach ~4 Wochen, Stufe 10 nach ~14, Stufe 16 nach ~34 Wochen). */
+const LEVEL_MAX = 16;
+const DEKO = [
+  { lv: 1, id: 'wiese', name: 'Dichtere Wiese' },
+  { lv: 2, id: 'laternen', name: 'Papierlaternen' },
+  { lv: 3, id: 'schmetterlinge', name: 'Schmetterlinge' },
+  { lv: 4, id: 'ranken', name: 'Ranken am Zaun' },
+  { lv: 5, id: 'steinweg', name: 'Steinweg mit Laternen' },
+  { lv: 6, id: 'teich', name: 'Teich mit Fischen' },
+  { lv: 7, id: 'vogelhaus', name: 'Vogelhaus und Vögel' },
+  { lv: 8, id: 'bienen', name: 'Bienen' },
+  { lv: 9, id: 'katze', name: 'Eine Katze' },
+  { lv: 10, id: 'windspiel', name: 'Windspiel' },
+  { lv: 11, id: 'brunnen', name: 'Brunnen' },
+  { lv: 12, id: 'gewaechshaus', name: 'Gewächshaus' },
+  { lv: 13, id: 'igel', name: 'Ein Igel' },
+  { lv: 14, id: 'gluehwuermchen', name: 'Glühwürmchen-Schwarm' },
+  { lv: 15, id: 'regenbogen', name: 'Regenbogen' },
+  { lv: 16, id: 'gold', name: 'Sternschnuppen und Goldglanz' }
+];
+const xpFor = (L) => 1.6 * Math.pow(L, 1.8);
+function levelOfXp(xp) { let L = 0; while (L < LEVEL_MAX && xp >= xpFor(L + 1)) L++; return L; }
+function gardenLevel() { return levelOverride != null ? levelOverride : levelOfXp(state.garden.xp); }
+/** 1 = alles frisch, 0 = alles welk. Pausierte zählen nicht. */
+function vitality(t = today()) {
+  const ps = state.garden.plants.filter((p) => p.paused == null);
+  if (!ps.length) return 1;
+  let bad = 0;
+  for (const p of ps) { const c = condition(p, t); bad += c === 2 ? 1 : c === 1 ? 0.35 : 0; }
+  return 1 - bad / ps.length;
+}
+/** Welkt viel, ziehen sich Deko und Tiere vorübergehend zurück (nichts geht verloren). */
+function effLevel(L, vit) { return vit >= 0.75 ? L : Math.floor(L * vit / 0.75); }
+
+/* ------------------------------------------------------------------ Pixel-Sprite-Baukasten
+   Gezeichnet wird immer in einem gedachten 40x50-Raum (CX/BY = Fußpunkt). Für die Stufen über
+   „Voll“ wird dieser Raum mit tK vergrößert in einen größeren Puffer gerastert – scharfe Pixel. */
+let tK = 1, tOX = 20, tOY = SH - 1;
+const tx = (x) => tOX + (x - 20) * tK, ty = (y) => tOY + (y - (SH - 1)) * tK;
+function Buf(w, h) {
+  this.w = w || SW; this.h = h || SH;
+  this.c = new Array(this.w * this.h).fill(null);
+  this.p = new Int16Array(this.w * this.h).fill(-1);
   this.cur = 0;
 }
 Buf.prototype.part = function () { return ++this.cur; };
-Buf.prototype.put = function (x, y, col) {
+Buf.prototype.raw = function (x, y, col) {
   x = Math.round(x); y = Math.round(y);
   if (x < 0 || y < 0 || x >= this.w || y >= this.h || !col) return;
   const i = y * this.w + x;
   this.c[i] = col; this.p[i] = this.cur;
 };
+Buf.prototype.put = function (x, y, col) { this.raw(tx(x), ty(y), col); };
 
-function disc(b, cx, cy, rx, ry, col) {
+function discRaw(b, cx, cy, rx, ry, col) {
   for (let y = Math.floor(cy - ry - 1); y <= Math.ceil(cy + ry + 1); y++) {
     for (let x = Math.floor(cx - rx - 1); x <= Math.ceil(cx + rx + 1); x++) {
       const dx = (x - cx) / (rx + 0.5), dy = (y - cy) / (ry + 0.5);
-      if (dx * dx + dy * dy <= 1) b.put(x, y, col);
+      if (dx * dx + dy * dy <= 1) b.raw(x, y, col);
     }
   }
 }
+function disc(b, cx, cy, rx, ry, col) { discRaw(b, tx(cx), ty(cy), rx * tK, ry * tK, col); }
 function dot(b, x, y, th, col) {
-  if (th <= 1.25) { b.put(x, y, col); return; }
-  if (th <= 2.25) {
-    const fx = Math.floor(x), fy = Math.floor(y);
-    b.put(fx, fy, col); b.put(fx + 1, fy, col); b.put(fx, fy + 1, col); b.put(fx + 1, fy + 1, col);
+  const X = tx(x), Y = ty(y), t = th * tK;
+  if (t <= 1.25) { b.raw(X, Y, col); return; }
+  if (t <= 2.25) {
+    const fx = Math.floor(X + 1e-6), fy = Math.floor(Y + 1e-6);
+    b.raw(fx, fy, col); b.raw(fx + 1, fy, col); b.raw(fx, fy + 1, col); b.raw(fx + 1, fy + 1, col);
     return;
   }
-  disc(b, x, y, th / 2 - 0.5, th / 2 - 0.5, col);
+  discRaw(b, X, Y, t / 2 - 0.5, t / 2 - 0.5, col);
 }
 function seg(b, x0, y0, x1, y1, th, col) {
-  const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) * 2));
+  const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) * 2 * tK));
   for (let i = 0; i <= n; i++) { const t = i / n; dot(b, lerp(x0, x1, t), lerp(y0, y1, t), th, col); }
 }
 function qp(a, t) {
@@ -187,12 +312,13 @@ function qp(a, t) {
   return [u * u * a[0] + 2 * u * t * a[2] + t * t * a[4], u * u * a[1] + 2 * u * t * a[3] + t * t * a[5]];
 }
 function curve(b, a, th0, th1, col) {
-  const n = 56;
+  const n = Math.ceil(56 * tK);
   for (let i = 0; i <= n; i++) { const t = i / n; const q = qp(a, t); dot(b, q[0], q[1], lerp(th0, th1, t), col); }
 }
 /** Blatt: Basis bei (x0,y0), Richtung ang. Zweifarbig (Mittelrippe), optional rund + Schlitze. */
 function leaf(b, x0, y0, ang, len, wid, col, dark, opt) {
   opt = opt || {};
+  x0 = tx(x0); y0 = ty(y0); len *= tK; wid *= tK;
   const ca = Math.cos(ang), sa = Math.sin(ang);
   const r = Math.ceil(len + wid + 1);
   const pw = opt.round ? 0.45 : 0.8;
@@ -220,7 +346,7 @@ function leaf(b, x0, y0, ang, len, wid, col, dark, opt) {
           if (hole) continue;
         }
       }
-      b.put(x, y, (dark && v > 0.4) ? dark : col);
+      b.raw(x, y, (dark && v > 0.4 * tK) ? dark : col);
     }
   }
 }
@@ -255,7 +381,7 @@ function drawSeed(b, sp) {
 }
 
 const DRAW = {
-  farn(b, st, d, w) {
+  farn(b, st, d, w, ex) {
     const G = wiltC([108, 174, 126], w), D = wiltC([66, 128, 106], w), Li = wiltC([158, 210, 156], w);
     if (st === 1) {
       b.part(); curve(b, [CX - 1, BY, CX - 4, BY - 6, CX - 1, BY - 10 + d * 4], 1.5, 1.1, G);
@@ -264,7 +390,7 @@ const DRAW = {
       disc(b, CX + 3, BY - 8 + d * 3, 1.1, 1.1, G);
       return;
     }
-    const cfg = st === 2 ? { n: 4, len: 14, spread: 0.75 } : st === 3 ? { n: 6, len: 20, spread: 0.9 } : { n: 8, len: 27, spread: 1.0 };
+    const cfg = st === 2 ? { n: 4, len: 14, spread: 0.75 } : st === 3 ? { n: 6, len: 20, spread: 0.9 } : { n: 8 + ex, len: 27 + ex * 1.5, spread: 1.0 + ex * 0.13 };
     const angs = [];
     for (let i = 0; i < cfg.n; i++) angs.push(-Math.PI / 2 + (i / (cfg.n - 1) - 0.5) * 2 * cfg.spread);
     angs.sort((a1, a2) => Math.abs(a2 + Math.PI / 2) - Math.abs(a1 + Math.PI / 2));
@@ -278,13 +404,21 @@ const DRAW = {
       b.part(); curve(b, [CX + 1, BY, CX + 2, BY - 9, CX, BY - 13], 1.3, 1, Li);
       disc(b, CX - 0.5, BY - 14, 1.3, 1.3, Li); b.put(CX, BY - 14, G);
     }
+    if (ex >= 2) { // eingerollte junge Wedel (Fiddleheads)
+      for (const sd of [-1, 1]) {
+        b.part(); curve(b, [CX + sd * 2, BY, CX + sd * 5, BY - 14, CX + sd * 3, BY - 27 + d * 10], 1.3, 1, Li);
+        disc(b, CX + sd * 3.5, BY - 28 + d * 10, 1.7, 1.7, G); b.put(CX + sd * 3.5, BY - 28 + d * 10, Li); b.put(CX + sd * 4, BY - 27 + d * 10, D);
+      }
+    }
+    if (ex >= 1 && w < 0.6) sprinkle(b, 6 + ex * 6, [[246, 240, 214], [214, 236, 170]], 11 + ex, false);
+    if (ex >= 3 && w < 0.6) sprinkle(b, 14, [[255, 226, 140], [250, 246, 190]], 77, true);
   },
 
-  sonnenblume(b, st, d, w) {
+  sonnenblume(b, st, d, w, ex) {
     const G = wiltC([112, 172, 106], w), D = wiltC([74, 128, 88], w);
     const Y = wiltC([250, 204, 96], w, 'flower'), Y2 = wiltC([236, 158, 74], w, 'flower');
     const C = wiltC([120, 78, 58], w, 'flower'), C2 = wiltC([84, 54, 48], w, 'flower');
-    const H = [0, 10, 18, 27, 34][st];
+    const H = [0, 10, 18, 27, 34][st] + ex * 3;
     const tipX = CX + d * 7, tipY = BY - H + d * H * 0.16;
     const stem = [CX, BY, CX - d * 1.5, BY - H * 0.6, tipX, tipY];
     b.part(); curve(b, stem, st >= 3 ? 2.2 : 1.5, st >= 3 ? 1.6 : 1, D);
@@ -315,13 +449,27 @@ const DRAW = {
       b.part(); seg(b, q[0], q[1], sx, sy, 1, D);
       head(sx, sy, 2, 3.2);
     }
+    if (ex >= 1) { // weitere Köpfe an Seitentrieben
+      const extra = [[0.62, 9, -6, 2.4, 3.6], [0.3, -10, -3, 2.2, 3.2], [0.78, -9, -8, 2, 3]].slice(0, ex);
+      for (const [tt, ox, oy, R2, pl2] of extra) {
+        const q = qp(stem, tt);
+        const sx = q[0] + ox, sy = q[1] + oy + d * 4;
+        b.part(); seg(b, q[0], q[1], sx, sy + 1, 1, D);
+        b.part(); leaf(b, (q[0] + sx) / 2, (q[1] + sy) / 2, ox > 0 ? -0.2 : -Math.PI + 0.2, 4, 1.5, G, D);
+        head(sx, sy, R2, pl2);
+      }
+    }
     if (st >= 3) {
-      const R = st === 3 ? 3 : 4, pl = st === 3 ? 4 : 5.5;
+      const R = st === 3 ? 3 : 4 + (ex >= 3 ? 1 : 0), pl = st === 3 ? 4 : 5.5 + (ex >= 2 ? 1 : 0);
       head(tipX + d * 2, tipY - 2 + d * 4, R, pl);
+      if (ex >= 3 && w < 0.6) { // goldener Ring im Kopf
+        b.part();
+        for (let k = 0; k < 10; k++) { const a = k / 10 * Math.PI * 2; b.put(tipX + d * 2 + Math.cos(a) * 3.3, tipY - 2 + d * 4 + Math.sin(a) * 3, [255, 224, 130]); }
+      }
     }
   },
 
-  kaktus(b, st, d, w) {
+  kaktus(b, st, d, w, ex) {
     const G = wiltC([110, 170, 130], w), D = wiltC([72, 126, 104], w), Li = wiltC([156, 204, 164], w);
     const S = [244, 236, 210];
     const P = wiltC([244, 150, 178], w, 'flower'), P2 = wiltC([252, 204, 216], w, 'flower'), Pc = wiltC([250, 214, 120], w, 'flower');
@@ -335,10 +483,11 @@ const DRAW = {
     }
     const column = (x0, y0, h, r) => {
       b.part();
-      for (let y = 0; y <= h; y++) {
+      const stp = 1 / Math.max(1, tK * 1.2); // bei großen Stufen feiner abtasten, sonst Lücken
+      for (let y = 0; y <= h; y += stp) {
         const yy = y0 - y, xx = x0 + y * lean;
         const rr = y > h - r ? Math.sqrt(Math.max(0, r * r - (y - (h - r)) ** 2)) : r;
-        for (let x = Math.floor(xx - rr - 1); x <= Math.ceil(xx + rr + 1); x++) {
+        for (let x = Math.floor(xx - rr - 1); x <= Math.ceil(xx + rr + 1); x += stp) {
           if (Math.abs(x - xx) <= rr + 0.15) {
             const k = (((Math.round(x - xx) % 3) + 3) % 3);
             b.put(x, yy, k === 0 ? D : (x < xx - rr * 0.3 && k === 1 ? Li : G));
@@ -355,7 +504,7 @@ const DRAW = {
       for (let k = 0; k < 6; k++) { const a = k / 6 * Math.PI * 2; leaf(b, x, y, a, 2.2 * s, 1.1 * s, k % 2 ? P : P2, null); }
       b.put(x, y, Pc);
     };
-    const H = [0, 0, 14, 22, 31][st], R = [0, 0, 4.2, 4.8, 5.2][st] * shrink;
+    const H = [0, 0, 14, 22, 31][st] + ex * 2, R = ([0, 0, 4.2, 4.8, 5.2][st] + ex * 0.3) * shrink;
     const arm = (side, yAt, h, r) => {
       const ax = CX + yAt * lean + side * (R + r + 1.5);
       b.part(); seg(b, CX + yAt * lean + side * (R - 1), BY - yAt + 1, ax, BY - yAt + 1, r * 2, G);
@@ -365,14 +514,27 @@ const DRAW = {
     let tips = [];
     if (st === 3) tips.push(arm(-1, 9, 7, 2.2 * shrink));
     if (st === 4) { tips.push(arm(-1, 11, 9, 2.4 * shrink)); tips.push(arm(1, 17, 7, 2.2 * shrink)); }
+    if (ex >= 2) tips.push(arm(1, 7, 5, 2 * shrink));
+    if (ex >= 3) tips.push(arm(-1, 22, 6, 1.9 * shrink));
     column(CX, BY, H, R);
     if (st >= 3 && w < 0.5) {
-      flower(CX + H * lean, BY - H - 1, st === 4 ? 1.3 : 1.1);
+      flower(CX + H * lean, BY - H - 1, st === 4 ? 1.3 + ex * 0.15 : 1.1);
       if (st === 4) tips.forEach((t) => flower(t[0], t[1], 0.9));
+      if (ex >= 1) { // Blüten an den Seiten
+        const side = [[-1, 8], [1, 14], [-1, 20], [1, 25], [-1, 26]].slice(0, 1 + ex);
+        for (const [sd, yy] of side) flower(CX + yy * lean + sd * (R + 0.5), BY - yy, 0.75);
+      }
+      if (ex >= 2) { // rote Kaktusfeigen
+        b.part();
+        tips.slice(0, 2 + ex).forEach((t, i) => { disc(b, t[0] + (i % 2 ? 2 : -2), t[1] + 3, 1, 1.3, [214, 84, 104]); b.put(t[0] + (i % 2 ? 2 : -2), t[1] + 2, [246, 150, 160]); });
+      }
+      if (ex >= 3) { // Blütenkrone
+        for (let k = 0; k < 5; k++) { const a = -Math.PI / 2 + (k - 2) * 0.55; flower(CX + H * lean + Math.cos(a) * 4, BY - H + 1 + Math.sin(a) * 2.5, 0.8); }
+      }
     }
   },
 
-  kirschbaum(b, st, d, w) {
+  kirschbaum(b, st, d, w, ex) {
     const T = wiltC([136, 96, 78], w, 'wood'), Td = wiltC([98, 68, 62], w, 'wood');
     const G = wiltC([128, 176, 114], w), Gd = wiltC([86, 136, 98], w), Gl = wiltC([168, 206, 140], w);
     const P = wiltC([248, 184, 204], w, 'flower'), Pd = wiltC([222, 136, 168], w, 'flower'), Pl = wiltC([255, 226, 234], w, 'flower');
@@ -402,6 +564,7 @@ const DRAW = {
     const cy = big ? BY - 33 : BY - 25;
     const puffs = big
       ? [[-12, 2, 5], [12, 1, 5], [-7, -6, 6.5], [7, -7, 6.5], [0, -11, 6], [-4, 2, 6.5], [5, 2, 6.5], [-14, -4, 4], [14, -5, 4]]
+        .concat(ex >= 2 ? [[-17, 3, 3.6], [17, 2, 3.6], [-10, 7, 4], [10, 7, 4]] : [])
       : [[-8, 1, 4.2], [8, 0, 4.2], [-3, -5, 5], [4, -5, 5], [0, 1, 5]];
     puffs.sort((p1, p2) => p1[1] - p2[1]);
     for (const [dx, dy, r] of puffs) {
@@ -412,14 +575,24 @@ const DRAW = {
     // einzelne Blüten-Tupfer
     if (w < 0.6) {
       b.part();
-      for (let i = 0; i < (big ? 26 : 12); i++) {
-        const a = rnd() * Math.PI * 2, rr = Math.sqrt(rnd()) * (big ? 15 : 10);
+      for (let i = 0; i < (big ? 26 + ex * 14 : 12); i++) {
+        const a = rnd() * Math.PI * 2, rr = Math.sqrt(rnd()) * (big ? 15 + ex : 10);
         b.put(CX + Math.cos(a) * rr, cy + Math.sin(a) * rr * 0.75 + sag - 1, rnd() < 0.5 ? Pl : P);
       }
     }
+    if (ex >= 1 && w < 0.6) { // Kirschen
+      const K = wiltC([206, 58, 84], w, 'flower'), Kl = [250, 150, 160];
+      for (let i = 0; i < 3 + ex * 3; i++) {
+        const a = rnd() * Math.PI * 2, rr = 4 + Math.sqrt(rnd()) * (12 + ex);
+        const x = CX + Math.cos(a) * rr, y = cy + 3 + Math.sin(a) * rr * 0.6 + sag;
+        b.part(); b.put(x, y - 2, Td); b.put(x - 1, y - 1, Td); b.put(x + 1, y - 1, Td);
+        disc(b, x - 1, y, 0.6, 0.6, K); disc(b, x + 1.3, y + 0.3, 0.6, 0.6, K); b.put(x - 1, y - 0.4, Kl);
+      }
+    }
+    if (ex >= 3 && w < 0.6) sprinkle(b, 16, [[255, 232, 160], [255, 246, 220]], 131, false);
   },
 
-  monstera(b, st, d, w) {
+  monstera(b, st, d, w, ex) {
     const G = wiltC([82, 158, 120], w), D = wiltC([54, 116, 96], w), S = wiltC([104, 150, 98], w);
     const dr = (a) => a + d * 1.0 * Math.sign(Math.cos(a) || 1);
     const L = {
@@ -427,7 +600,10 @@ const DRAW = {
       2: [[-6, -10, -2.6, 7, 0], [6, -12, -0.5, 7, 0], [0, -15, -1.65, 6.5, 0]],
       3: [[-7, -12, -2.8, 10, 1], [7, -14, -0.35, 10, 2], [-3, -22, -2.15, 9, 1], [4, -24, -0.95, 9.5, 2]],
       4: [[-8, -10, 3.0, 12, 3], [8, -12, 0.15, 12, 3], [-5, -24, -2.5, 12, 3], [6, -27, -0.7, 12, 3], [0, -31, -1.6, 10, 2]]
-    }[st];
+    }[st].slice();
+    if (ex >= 1) L.unshift([-13, -6, 3.25, 10, 2], [13, -7, -0.05, 10, 2]);
+    if (ex >= 2) L.unshift([-11, -18, -2.85, 11, 3], [12, -20, -0.3, 11, 3]);
+    if (ex >= 3) L.push([-2, -36, -1.85, 9, 2]);
     L.forEach(([ax, ay, ang, size, slits], i) => {
       const x = CX + ax, y = BY + ay + d * size * 0.45;
       b.part();
@@ -441,8 +617,33 @@ const DRAW = {
       leaf(b, CX + 2, BY - 8, -1.25, 6, 2, [240, 228, 198], [214, 200, 168], { round: true });
       seg(b, CX + 2.5, BY - 9, CX + 3.5, BY - 12, 1, [232, 206, 140]);
     }
+    if (ex >= 2 && w < 0.5) { // Fruchtkolben
+      b.part();
+      leaf(b, CX - 3, BY - 6, -1.9, 9, 2.6, [244, 234, 204], [218, 204, 170], { round: true });
+      seg(b, CX - 3.5, BY - 8, CX - 5, BY - 14, 2, [236, 214, 140]);
+      b.put(CX - 4, BY - 12, [252, 236, 180]);
+    }
+    if (ex >= 3) { // Luftwurzeln und goldene Panaschierung
+      if (w < 0.6) sprinkle(b, 18, [[236, 230, 170], [255, 226, 140]], 57, false);
+    }
   }
 };
+
+/** Streut kleine Farbtupfer auf vorhandenes Laub (für Blüten, Früchte, Goldglanz). */
+function sprinkle(b, n, cols, seed, plus) {
+  const r = mulberry32(seed);
+  let k = 0, tries = 0;
+  while (k < n && tries < n * 60) {
+    tries++;
+    const x = Math.floor(r() * b.w), y = Math.floor(r() * b.h * 0.82);
+    if (!b.c[y * b.w + x]) continue;
+    b.part();
+    const col = cols[k % cols.length];
+    b.raw(x, y, col);
+    if (plus) { const c2 = mix(col, [255, 255, 255], 0.3); b.raw(x + 1, y, c2); b.raw(x - 1, y, c2); b.raw(x, y - 1, c2); b.raw(x, y + 1, c2); }
+    k++;
+  }
+}
 
 function frond(b, x0, y0, ang, len, droop, col, dark, light) {
   // Wedel: steigt auf, biegt sich nach außen; beim Hängen kippt die Spitze nach unten
@@ -466,11 +667,15 @@ function frond(b, x0, y0, ang, len, droop, col, dark, light) {
   curve(b, a, 1.2, 1, dark);
 }
 
+const STAGE_K = [1, 1, 1, 1, 1, 1.22, 1.44, 1.68]; // Vergrößerung der Extra-Stufen
 function buildBuf(sp, st, cond) {
-  const b = new Buf();
+  const K = STAGE_K[st];
+  const b = K === 1 ? new Buf() : new Buf(Math.round(SW * K / 2) * 2, Math.round(SH * K) + 2);
+  tK = K; tOX = b.w / 2; tOY = b.h - 1;
   const d = [0, 0.5, 0.95][cond], w = [0, 0.2, 0.85][cond];
   if (st === 0) drawSeed(b, sp);
-  else DRAW[sp](b, st, d, w);
+  else DRAW[sp](b, Math.min(4, st), d, w, Math.max(0, st - 4));
+  tK = 1; tOX = 20; tOY = SH - 1;
   return b;
 }
 
@@ -629,7 +834,10 @@ const landCv = document.createElement('canvas'), landCtx = landCv.getContext('2d
 
 let PX = 3, W = 125, H = 270, VH = 270, horizonY = 90, firstBase = 126, cols = 3;
 let slots = [], beds = [];
+let lowerTop = 0, lowerH = 0;               // unterer Garten (Weg, Teich, Brunnen) – wächst mit der Stufe
+let GS = { level: 0, eff: 0, vit: 1 };       // Garten-Zustand für das Zeichnen
 let pal = paletteAt(currentHour());
+const spriteH = (st) => STAGE_K[st] === 1 ? SH : Math.round(SH * STAGE_K[st]) + 2;
 
 const GRASS_TOP = [134, 170, 128], GRASS_BOT = [82, 122, 112];
 const SOIL = [100, 70, 60], SOIL_TOP = [128, 92, 74], SOIL_WET = [70, 48, 46];
@@ -648,15 +856,24 @@ function layout() {
   VH = Math.max(120, Math.ceil(vh / PX));
   horizonY = Math.max(60, Math.round(VH * 0.36));
   firstBase = horizonY + 38;
-  cols = clamp(Math.floor((W - 8) / 36), 1, 6);
-  const slotW = Math.min(SLOT, Math.floor((W - 8) / cols));
+  // Riesige Pflanzen brauchen breitere Plätze: dann weniger Spalten, der Garten wächst nach unten.
+  let maxK = 1;
+  for (const p of state.garden.plants) maxK = Math.max(maxK, STAGE_K[stageOf(p.growth)]);
+  const need = Math.max(36, SW * maxK * 0.8);
+  cols = clamp(Math.floor((W - 8) / need), 1, 6);
+  const slotW = Math.min(Math.round(SLOT * Math.max(1, maxK * 0.85)), Math.floor((W - 8) / cols));
   const plants = state.garden.plants, n = plants.length;
   const rows = Math.max(1, Math.ceil(n / cols));
   slots = []; beds = [];
+  let base = firstBase;
   for (let r = 0; r < rows; r++) {
     const items = n ? Math.min(cols, n - r * cols) : Math.min(cols, 3);
     const x0 = Math.round((W - items * slotW) / 2);
-    const base = firstBase + r * RH;
+    if (r > 0) { // große Pflanzen brauchen mehr Platz nach oben
+      let mh = SH;
+      for (let i = 0; i < items; i++) mh = Math.max(mh, spriteH(stageOf(plants[r * cols + i].growth)));
+      base += RH + Math.max(0, mh - SH - 4);
+    }
     beds.push({ x0: x0 - 4, x1: x0 + items * slotW + 4, base });
     if (!n) continue;
     for (let i = 0; i < items; i++) {
@@ -665,7 +882,10 @@ function layout() {
       slots.push({ p, cx: x0 + i * slotW + slotW / 2, base, flip: (hs & 1) === 1, phase: (hs % 628) / 100 });
     }
   }
-  H = Math.max(VH, firstBase + (rows - 1) * RH + 18 + Math.ceil(100 / PX));
+  const L = gardenLevel();
+  lowerTop = base + 26;
+  lowerH = L >= 6 ? 86 : L >= 5 ? 34 : 0;
+  H = Math.max(VH, lowerTop + lowerH + Math.ceil(90 / PX));
   for (const cv of [canvas, skyCv, landCv]) { cv.width = W; cv.height = H; }
   canvas.style.width = W * PX + 'px';
   canvas.style.height = H * PX + 'px';
@@ -730,7 +950,9 @@ function renderSky() {
 }
 
 function renderLand() {
-  const c = landCtx, hz = horizonY;
+  const c = landCtx, hz = horizonY, t = today();
+  GS.level = gardenLevel(); GS.vit = vitality(t); GS.eff = effLevel(GS.level, GS.vit);
+  const E = GS.eff;
   c.clearRect(0, 0, W, H);
   // ferne Hügel
   c.fillStyle = css(pal.far);
@@ -759,26 +981,37 @@ function renderLand() {
     c.fillStyle = css(mix(pal.near, pal.bot, 0.18));
     c.fillRect(Math.round(x) - 1, Math.round(y - r * 2 + 1), 1, 1);
   }
+  if (E >= 12) drawGreenhouse(c);
   // Wiese
   for (let y = hz; y < H; y++) {
-    const t = Math.min(1, (y - hz) / Math.max(40, VH - hz));
-    c.fillStyle = css(A(mix(GRASS_TOP, GRASS_BOT, t)));
+    const tt = Math.min(1, (y - hz) / Math.max(40, VH - hz));
+    c.fillStyle = css(A(mix(GRASS_TOP, GRASS_BOT, tt)));
     c.fillRect(0, y, W, 1);
   }
   const r2 = mulberry32(5);
-  const nTuft = Math.floor(W * (H - hz) / 45);
+  const nTuft = Math.floor(W * (H - hz) / 45 * (1 + Math.min(E, 10) * 0.14));
   for (let i = 0; i < nTuft; i++) {
     const x = Math.floor(r2() * W), y = hz + 2 + Math.floor(r2() * (H - hz));
-    const t = Math.min(1, (y - hz) / Math.max(40, VH - hz));
-    const base = mix(GRASS_TOP, GRASS_BOT, t);
-    c.fillStyle = css(A(r2() < 0.5 ? mix(base, [210, 230, 170], 0.25) : mix(base, [40, 70, 70], 0.25)));
-    c.fillRect(x, y, 1, r2() < 0.4 ? 2 : 1);
+    const tt = Math.min(1, (y - hz) / Math.max(40, VH - hz));
+    const base = mix(GRASS_TOP, GRASS_BOT, tt);
+    const light = r2() < 0.5;
+    c.fillStyle = css(A(light ? mix(base, [210, 230, 170], 0.25) : mix(base, [40, 70, 70], 0.25)));
+    const tall = E >= 1 && r2() < 0.18 + E * 0.015;
+    c.fillRect(x, y, 1, tall ? 3 : r2() < 0.4 ? 2 : 1);
+    if (tall) { c.fillRect(x - 1, y + 1, 1, 2); c.fillRect(x + 1, y, 1, 3); }
   }
-  const FLOWERS = [[250, 214, 226], [252, 236, 200], [200, 186, 240], [250, 190, 160]];
-  for (let i = 0; i < W / 4; i++) {
+  const FLOWERS = [[250, 214, 226], [252, 236, 200], [200, 186, 240], [250, 190, 160], [255, 246, 236]];
+  const nFl = Math.floor(W / 4 * (1 + E * 0.35) * (H - hz) / Math.max(1, VH - hz));
+  for (let i = 0; i < nFl; i++) {
     const x = Math.floor(r2() * W), y = hz + 3 + Math.floor(r2() * (H - hz));
-    c.fillStyle = css(A(FLOWERS[i % 4]));
+    const col = A(FLOWERS[i % 5]);
+    c.fillStyle = css(col);
     c.fillRect(x, y, 1, 1);
+    if (E >= 3 && i % 3 === 0) { // kleine Blüten statt Pünktchen
+      c.fillRect(x - 1, y, 1, 1); c.fillRect(x + 1, y, 1, 1); c.fillRect(x, y - 1, 1, 1);
+      c.fillStyle = css(A([250, 222, 120])); c.fillRect(x, y, 1, 1);
+      c.fillStyle = css(A([96, 140, 100])); c.fillRect(x, y + 1, 1, 1);
+    }
   }
   // Zaun
   c.fillStyle = css(A(FENCE_D));
@@ -793,18 +1026,27 @@ function renderLand() {
   }
   c.fillStyle = 'rgba(30,20,40,.12)';
   c.fillRect(0, hz + 2, W, 2);
+  if (E >= 4) drawVines(c, E);
+  if (E >= 7) drawBirdhouse(c);
+  // unterer Garten
+  if (E >= 5) drawPath(c);
+  if (E >= 6) drawPond(c);
+  if (E >= 11) drawFountainBase(c);
   // Beete
   for (const bed of beds) drawBed(c, bed);
-  // nasse Erde unter heute gegossenen Pflanzen
-  const t = today();
   for (const s of slots) {
-    if (wateredToday(s.p, t) && !pendingVis.has(s.p.id)) {
+    const p = s.p;
+    // nasse Erde unter heute gegossenen Pflanzen
+    if (wateredToday(p, t) && !pendingVis.has(p.id)) {
       c.fillStyle = css(A(SOIL_WET));
       c.beginPath(); c.ellipse(s.cx, s.base - 0.5, 9, 2.2, 0, 0, Math.PI * 2); c.fill();
       c.fillStyle = css(A(mix(SOIL_WET, [170, 200, 220], 0.35)));
       c.fillRect(Math.round(s.cx) - 5, s.base - 2, 2, 1);
       c.fillRect(Math.round(s.cx) + 4, s.base, 1, 1);
     }
+    if (p.paused != null) drawBlanket(c, s);
+    drawWeekDrops(c, s, t);
+    drawCompanions(c, s, t);
   }
   // Lichterkette
   c.fillStyle = css(A([66, 52, 76]));
@@ -816,6 +1058,220 @@ function renderLand() {
     c.fillRect(x - 1, y, 3, 2);
     c.fillRect(x, y + 2, 1, 1);
   });
+  if (E >= 2) lanternList().forEach(([x, y, col]) => {
+    c.fillStyle = css(A([60, 48, 66]));
+    c.fillRect(x, y - 2, 1, 2);
+    c.fillRect(x - 1, y, 3, 1); c.fillRect(x - 1, y + 5, 3, 1);
+    c.fillStyle = css(A(mix(col, [140, 100, 110], 0.3)));
+    c.fillRect(x - 2, y + 1, 5, 4);
+    c.fillStyle = css(A(mix(col, [90, 60, 80], 0.45)));
+    c.fillRect(x - 2, y + 2, 5, 1); c.fillRect(x - 2, y + 4, 5, 1);
+    c.fillStyle = css(A([200, 80, 80])); c.fillRect(x, y + 6, 1, 1);
+  });
+}
+
+/* ---------- Deko-Bausteine (alles Pixel, alles im Code) ---------- */
+const F = (c, col, x, y, w = 1, h = 1) => { c.fillStyle = css(A(col)); c.fillRect(Math.round(x), Math.round(y), w, h); };
+function pell(c, x, y, rx, ry, col) { // Pixel-Ellipse
+  c.fillStyle = css(A(col));
+  for (let dy = -Math.ceil(ry); dy <= Math.ceil(ry); dy++) {
+    const k = 1 - (dy * dy) / ((ry + 0.4) * (ry + 0.4));
+    if (k <= 0) continue;
+    const hw = Math.floor(rx * Math.sqrt(k) + 0.3);
+    c.fillRect(Math.round(x) - hw, Math.round(y) + dy, hw * 2 + 1, 1);
+  }
+}
+const LANTERN_COLS = [[255, 170, 130], [255, 214, 140], [246, 160, 190]];
+function lanternList() {
+  const out = [];
+  const wc = windchimeX();
+  for (let x = 23, i = 0; x < W - 6; x += 22, i++) {
+    if (GS.eff >= 10 && Math.abs(x - wc) < 8) continue;
+    out.push([x, Math.round(lightY(x)) + 2, LANTERN_COLS[i % 3]]);
+  }
+  return out;
+}
+const windchimeX = () => Math.round(W * 0.84);
+const pathY = (x) => lowerTop + 7 + Math.round(Math.sin(x * 0.07 + 0.6) * 2.5);
+const pondGeo = () => ({ x: Math.round(W * 0.32), y: lowerTop + 52, rx: Math.min(30, Math.round(W * 0.24)), ry: 13 });
+const fountGeo = () => ({ x: Math.round(W * 0.79), y: lowerTop + 60 });
+function stoneLanterns() { return [[6, pathY(6)], [W - 7, pathY(W - 7)]]; }
+
+function drawPath(c) {
+  const STONE = [184, 172, 166];
+  for (let x = 3; x < W; x += 8) {
+    const y = pathY(x) + ((x / 8) % 2 ? 1 : -1);
+    pell(c, x + 1, y + 1, 3, 1.4, [70, 60, 70]);
+    pell(c, x, y, 3, 1.4, STONE);
+    F(c, mix(STONE, [255, 255, 255], 0.35), x - 2, y - 1, 2, 1);
+  }
+  // Blumen säumen den Weg
+  const r = mulberry32(77);
+  for (let x = 2; x < W; x += 3 + r() * 4) {
+    const y = pathY(x) + (r() < 0.5 ? -4 : 4);
+    if (r() < 0.55) mini(c, r() < 0.8 ? 0 : 3, Math.round(x), Math.round(y), FLOWER_COLS[(r() * 5) | 0]);
+  }
+  for (const [x, y] of stoneLanterns()) {
+    const S = [150, 144, 150], Sd = [110, 104, 116];
+    F(c, Sd, x - 2, y + 1, 5, 2); F(c, S, x - 1, y - 3, 3, 4);
+    F(c, Sd, x - 2, y - 7, 5, 4); F(c, [250, 214, 150], x - 1, y - 6, 3, 2);
+    F(c, S, x - 3, y - 8, 7, 1); F(c, S, x - 2, y - 9, 5, 1); F(c, S, x, y - 10, 1, 1);
+  }
+}
+function drawPond(c) {
+  const P = pondGeo();
+  pell(c, P.x + 1, P.y + 2, P.rx + 3, P.ry + 2, [60, 50, 66]);
+  pell(c, P.x, P.y, P.rx + 3, P.ry + 2, [160, 150, 156]);
+  pell(c, P.x, P.y, P.rx, P.ry, [56, 96, 124]);
+  pell(c, P.x, P.y - 2, P.rx - 3, P.ry - 4, [76, 128, 150]);
+  pell(c, P.x - 4, P.y - 5, P.rx - 12, 2, [120, 172, 186]);
+  const r = mulberry32(4);
+  for (let i = 0; i < 16; i++) { // Randsteine
+    const a = i / 16 * Math.PI * 2;
+    F(c, i % 2 ? [190, 180, 182] : [132, 124, 134], P.x + Math.cos(a) * (P.rx + 2), P.y + Math.sin(a) * (P.ry + 1.5), 2, 1);
+  }
+  const pads = [[-0.5, 0.2], [0.35, -0.3], [0.55, 0.35], [-0.2, -0.45]];
+  pads.forEach(([u, v], i) => {
+    const x = P.x + u * P.rx, y = P.y + v * P.ry;
+    pell(c, x, y, 3, 1.4, [96, 154, 104]);
+    F(c, [56, 96, 124], x + 1, y - 1, 2, 1);
+    F(c, [140, 196, 130], x - 2, y - 1, 2, 1);
+    if (i % 2 === 0) { F(c, [250, 196, 214], x - 1, y - 2, 3, 1); F(c, [255, 236, 240], x, y - 3, 1, 1); F(c, [250, 222, 120], x, y - 2, 1, 1); }
+  });
+  // Blumenbüsche rund um den Teich (mehr mit höherer Stufe)
+  const nB = Math.min(12, 4 + (GS.eff - 6));
+  for (let i = 0; i < nB; i++) {
+    const a = Math.PI * (0.85 + (i / nB) * 1.3) + r() * 0.2;
+    const x = P.x + Math.cos(a) * (P.rx + 6), y = P.y + Math.sin(a) * (P.ry + 4);
+    bush(c, x, y, FLOWER_COLS[i % FLOWER_COLS.length], r);
+  }
+  // Schilf
+  for (const [x, h] of [[P.x + P.rx - 1, 9], [P.x + P.rx + 2, 7], [P.x - P.rx + 1, 8]]) {
+    F(c, [110, 150, 96], x, P.y - h, 1, h);
+    F(c, [140, 100, 70], x, P.y - h - 2, 1, 3);
+  }
+  void r;
+}
+function bush(c, x, y, col, r) {
+  pell(c, x + 1, y + 1, 3.5, 2, [56, 78, 70]);
+  pell(c, x, y, 3.5, 2.2, [92, 140, 100]);
+  F(c, [130, 180, 116], x - 2, y - 2, 2, 1);
+  for (let k = 0; k < 4; k++) F(c, col, x - 3 + r() * 6, y - 2 + r() * 3);
+}
+function drawFountainBase(c) {
+  const f = fountGeo(), S = [196, 186, 190], Sd = [130, 122, 136];
+  pell(c, f.x + 1, f.y + 3, 12, 3, [60, 50, 66]);
+  pell(c, f.x, f.y + 1, 12, 3.4, Sd);
+  pell(c, f.x, f.y, 11, 2.6, S);
+  pell(c, f.x, f.y, 9, 1.6, [86, 140, 168]);
+  F(c, [150, 200, 216], f.x - 6, f.y - 1, 4, 1);
+  F(c, Sd, f.x - 1, f.y - 9, 3, 9); F(c, S, f.x - 1, f.y - 9, 1, 9);
+  pell(c, f.x, f.y - 10, 5, 1.3, S);
+  F(c, [86, 140, 168], f.x - 3, f.y - 11, 7, 1);
+  F(c, S, f.x, f.y - 13, 1, 2);
+}
+function drawGreenhouse(c) {
+  const x0 = W - 34, w = 26, y1 = horizonY - 3, y0 = y1 - 13, peak = y0 - 7;
+  const FR = [236, 230, 222], GL = [170, 206, 214];
+  c.fillStyle = css(A(GL), 0.75);
+  c.fillRect(x0, y0, w, y1 - y0);
+  for (let i = 0; i <= 7; i++) { // Dach
+    const yy = y0 - i;
+    const hw = Math.round((w / 2) * (1 - i / 7.5));
+    c.fillStyle = css(A(GL), 0.75); c.fillRect(x0 + w / 2 - hw, yy, hw * 2, 1);
+    F(c, FR, x0 + w / 2 - hw - 1, yy); F(c, FR, x0 + w / 2 + hw, yy);
+  }
+  F(c, FR, x0 - 1, y0, 1, y1 - y0 + 1); F(c, FR, x0 + w, y0, 1, y1 - y0 + 1);
+  F(c, FR, x0, y0, w, 1); F(c, FR, x0, y1, w, 1);
+  for (let x = x0 + 6; x < x0 + w; x += 6) F(c, FR, x, y0 - (x === x0 + 12 ? 6 : 3), 1, y1 - y0 + (x === x0 + 12 ? 6 : 3));
+  F(c, FR, x0, y0 + 6, w, 1);
+  const r = mulberry32(12);
+  for (let i = 0; i < 16; i++) F(c, r() < 0.3 ? [240, 160, 170] : [96, 156, 106], x0 + 1 + r() * (w - 2), y1 - 1 - r() * 5);
+  F(c, [255, 255, 255], x0 + 2, y0 + 2, 2, 1); F(c, [255, 255, 255], x0 + 3, y0 + 3, 1, 1);
+}
+function drawVines(c, E) {
+  const hz = horizonY, r = mulberry32(21), dens = E >= 10 ? 0.85 : E >= 7 ? 0.6 : 0.4;
+  const G = [92, 146, 98], G2 = [126, 178, 110], FL = [[246, 186, 206], [250, 230, 170], [210, 190, 250]];
+  for (let x = 0; x < W; x++) {
+    const n = (Math.sin(x * 0.13) + Math.sin(x * 0.051 + 2)) * 0.25 + 0.5;
+    if (n > dens) continue;
+    const y = hz - 5 + Math.round(Math.sin(x * 0.45) * 1.6);
+    F(c, x % 3 ? G : G2, x, y);
+    if (r() < 0.35) F(c, G2, x, y - 1);
+    if (r() < 0.12) { F(c, G, x, y + 1, 1, 2 + (r() * 3 | 0)); }
+    if (r() < 0.07 + E * 0.006) F(c, FL[(r() * 3) | 0], x, y - 1);
+  }
+}
+function drawBirdhouse(c) {
+  const x = 6, hz = horizonY, W0 = [196, 124, 96], Rf = [150, 84, 92], P = [118, 80, 66];
+  F(c, P, x, hz - 12, 1, 26); F(c, [150, 108, 86], x - 1, hz - 12, 1, 26);
+  F(c, W0, x - 4, hz - 19, 8, 7); F(c, mix(W0, [255, 255, 255], 0.2), x - 4, hz - 19, 1, 7);
+  F(c, [60, 40, 50], x - 1, hz - 17, 2, 2); F(c, P, x - 2, hz - 14, 4, 1);
+  for (let i = 0; i < 4; i++) F(c, Rf, x - 5 + i, hz - 20 - i, 10 - i * 2, 1);
+}
+function drawBlanket(c, s) {
+  const x = Math.round(s.cx) - 11, y = s.base - 4;
+  F(c, [150, 132, 192], x, y, 22, 4);
+  F(c, [186, 168, 220], x, y, 22, 1);
+  for (let i = 2; i < 22; i += 5) F(c, [240, 214, 180], x + i, y + 1, 2, 3);
+  F(c, [110, 94, 150], x, y + 4, 22, 1);
+}
+function drawWeekDrops(c, s, t) {
+  const p = s.p;
+  if (p.paused != null) return;
+  const y = s.base + 3, cx = Math.round(s.cx);
+  if (p.goal >= 7) { // täglich: nur ein kleiner Glanz, wenn heute gegossen
+    if (wateredToday(p, t)) { F(c, [150, 214, 226], cx - 1, y + 1, 3, 1); F(c, [150, 214, 226], cx, y, 1, 3); F(c, [230, 250, 250], cx, y + 1, 1, 1); }
+    return;
+  }
+  const n = weekCount(p, t), g = p.goal, tot = Math.max(g, n);
+  const x0 = cx - Math.round((tot * 4 - 1) / 2);
+  for (let i = 0; i < tot; i++) {
+    const x = x0 + i * 4;
+    if (i < n) {
+      const col = i >= g ? [252, 222, 130] : [126, 196, 226];
+      F(c, col, x + 1, y, 1, 1); F(c, col, x, y + 1, 3, 2);
+      F(c, mix(col, [255, 255, 255], 0.55), x, y + 1, 1, 1);
+    } else {
+      F(c, [86, 56, 50], x + 1, y, 1, 1); F(c, [86, 56, 50], x, y + 1, 1, 2); F(c, [86, 56, 50], x + 2, y + 1, 1, 2); F(c, [86, 56, 50], x + 1, y + 3, 1, 1);
+    }
+  }
+}
+/** Ableger, Blumen und Pilze sprießen um gut gepflegte Pflanzen. */
+function drawCompanions(c, s, t) {
+  const p = s.p, st = stageOf(p.growth);
+  if (st < 4 || p.paused != null || condition(p, t) !== 0) return;
+  const n = [3, 5, 8, 11][st - 4];
+  const r = mulberry32(hashStr(p.id) ^ 0x5bd1);
+  const acc = SPECIES[p.species].accent;
+  for (let i = 0; i < n; i++) {
+    let x, y;
+    const sd = i % 2 ? 1 : -1;
+    if (i < 4) { x = s.cx + sd * (12 + r() * 6); y = s.base - 1; }                 // auf der Beeterde
+    else { x = s.cx + sd * (3 + r() * 16); y = s.base + 19 + r() * 7; }            // davor in der Wiese
+    const kind = (i + (hashStr(p.id) & 3)) % 4;
+    mini(c, kind, Math.round(x), Math.round(y), kind === 2 ? acc : FLOWER_COLS[i % FLOWER_COLS.length], p.species);
+  }
+}
+const FLOWER_COLS = [[250, 200, 214], [252, 232, 170], [206, 190, 246], [255, 244, 236], [250, 180, 150]];
+function mini(c, kind, x, y, col, sp) {
+  const G = [98, 156, 104], G2 = [134, 190, 120];
+  if (kind === 0) { // Blümchen
+    F(c, G, x, y - 2, 1, 3); F(c, G2, x + 1, y - 1);
+    F(c, col, x - 1, y - 3, 3, 1); F(c, col, x, y - 4, 1, 1); F(c, col, x, y - 2);
+    F(c, [250, 220, 120], x, y - 3);
+  } else if (kind === 1) { // Pilz
+    F(c, [236, 226, 210], x, y - 2, 1, 2);
+    F(c, [206, 92, 92], x - 1, y - 3, 3, 1); F(c, [206, 92, 92], x, y - 4);
+    F(c, [255, 240, 230], x - 1, y - 3);
+  } else if (kind === 2) { // Ableger: Mini-Version der Art
+    F(c, G, x, y - 3, 1, 3);
+    F(c, sp === 'kaktus' ? [110, 170, 130] : G2, x - 2, y - 4, 2, 1); F(c, G2, x + 1, y - 5, 2, 1);
+    F(c, col, x, y - 5);
+  } else { // Klee mit Blüte
+    F(c, G2, x - 1, y - 1, 3, 1); F(c, G, x, y - 2);
+    F(c, col, x + 1, y - 3); F(c, col, x + 2, y - 4);
+  }
 }
 function bulbList() {
   const out = [];
@@ -884,16 +1340,46 @@ const canSprite = (() => {
   return c;
 })();
 
-/* ------------------------------------------------------------------ Partikel */
-let stars = [], clouds = [], flies = [], dust = [], drops = [], sparks = [], petals = [], cans = [];
+/* ------------------------------------------------------------------ Partikel und Tiere
+   Alles mit festen Höchstzahlen, damit es auch bei Stufe 16 und 15 Pflanzen flüssig bleibt. */
+const MAX_SPARKS = 140, MAX_PETALS = 70, MAX_SPRAY = 18;
+let stars = [], clouds = [], flies = [], dust = [], drops = [], sparks = [], petals = [], cans = [], spray = [];
+let butterflies = [], bees = [], birds = [], fish = [];
+let shooting = null, swarmUntil = 0, rainbowUntil = 0, rainbowCv = null;
 const pendingVis = new Map(); // id -> {stage, cond} während der Gieß-Animation
 const wiggle = new Map();     // id -> Zeitpunkt des Gießens
 function initParticles() {
   const r = mulberry32(123);
   stars = Array.from({ length: Math.round(W * 0.35) }, () => ({ x: r(), y: r(), s: 0.6 + r() * 2.2, p: r() * 6.28, big: r() < 0.12 }));
   clouds = Array.from({ length: 4 }, (_, i) => ({ x: r() * W, y: 0.22 + r() * 0.4, s: 0.7 + r() * 0.7, v: 0.6 + r() * 0.9 + i * 0.1 }));
-  flies = Array.from({ length: 14 }, () => ({ x: r(), y: r(), a: 0.15 + r() * 0.3, b: 0.2 + r() * 0.3, c: 0.6 + r() * 1.2, p: r() * 6.28 }));
+  flies = Array.from({ length: 40 }, () => ({ x: r(), y: r(), a: 0.15 + r() * 0.3, b: 0.2 + r() * 0.3, c: 0.6 + r() * 1.2, p: r() * 6.28 }));
   dust = Array.from({ length: 22 }, () => ({ x: r() * W, y: r() * H, v: 0.8 + r() * 1.6, p: r() * 6.28, a: 0.3 + r() * 0.6 }));
+  const BCOL = [[250, 206, 120], [206, 186, 250], [252, 246, 236], [150, 204, 240], [250, 170, 190]];
+  butterflies = Array.from({ length: 5 }, (_, i) => ({ p: r() * 6.28, v: 0.6 + r() * 0.5, col: BCOL[i], k: i }));
+  bees = Array.from({ length: 6 }, (_, i) => ({ p: r() * 6.28, v: 0.8 + r() * 0.6, k: i * 2 + 1 }));
+  birds = Array.from({ length: 3 }, (_, i) => ({ p: r() * 8, u: 0.18 + i * 0.3 + r() * 0.08, col: i === 1 ? [110, 150, 204] : [150, 104, 88], br: i === 1 ? [244, 222, 120] : [234, 146, 96] }));
+  fish = Array.from({ length: 3 }, (_, i) => ({ p: i * 2.1, v: 0.25 + r() * 0.2, col: i === 2 ? [250, 244, 236] : [244, 140, 76] }));
+  rainbowCv = makeRainbow();
+}
+function makeRainbow() {
+  const cv = document.createElement('canvas');
+  const R = Math.round(W * 0.62), bw = 2;
+  const cols = [[244, 150, 160], [248, 192, 140], [248, 230, 150], [168, 214, 156], [146, 194, 232], [180, 160, 226]];
+  cv.width = W; cv.height = horizonY;
+  const c = cv.getContext('2d');
+  const cx = W * 0.5, cy = horizonY + 6;
+  for (let y = 0; y < horizonY; y++) for (let x = 0; x < W; x++) {
+    const d = Math.hypot(x - cx, (y - cy) * 1.15);
+    const k = Math.floor((R - d) / bw);
+    if (k >= 0 && k < cols.length) { c.fillStyle = css(cols[k]); c.fillRect(x, y, 1, 1); }
+  }
+  return cv;
+}
+function burst(x, y, n, col, spread) {
+  for (let i = 0; i < n && sparks.length < MAX_SPARKS; i++) {
+    const a = Math.random() * Math.PI * 2, v = 4 + Math.random() * spread;
+    sparks.push({ x: x + Math.cos(a) * 4, y: y + Math.sin(a) * 4, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 6, life: 0, max: 0.9 + Math.random() * 0.8, col, star: Math.random() < 0.45, g: 0 });
+  }
 }
 
 /* ------------------------------------------------------------------ Hauptschleife */
@@ -909,13 +1395,35 @@ function frame(now) {
 function start() { if (!raf) { last = performance.now(); raf = requestAnimationFrame(frame); } }
 function stop() { if (raf) cancelAnimationFrame(raf); raf = 0; }
 
+let eventToastShown = {};
+function rareEvents() {
+  const E = GS.eff;
+  if (pal.night > 0.6 && !shooting && E >= 8) {
+    const rate = E >= 16 ? 1 / 18 : 1 / 150;
+    if (Math.random() < rate * dt) startShootingStar();
+  }
+  if (pal.night > 0.6 && E >= 6 && T > swarmUntil && Math.random() < dt / 420) { swarmUntil = T + 30; eventToast('swarm', 'Ein Glühwürmchen-Schwarm tanzt durch den Garten.'); }
+  if (pal.night < 0.1 && E >= 8 && E < 15 && GS.vit > 0.9 && T > rainbowUntil && Math.random() < dt / 500) { rainbowUntil = T + 45; eventToast('rain', 'Ein Regenbogen über deinem Garten.'); }
+}
+function startShootingStar() {
+  shooting = { x: W * (0.35 + Math.random() * 0.6), y: 4 + Math.random() * horizonY * 0.3, t0: T, vx: -(55 + Math.random() * 25), vy: 22 + Math.random() * 10 };
+  eventToast('star', 'Eine Sternschnuppe. Wünsch dir was.');
+}
+function eventToast(k, msg) {
+  if (eventToastShown[k] || !blatt.hidden) return;
+  eventToastShown[k] = true;
+  toastLater(msg);
+}
+
 function draw() {
   if (!W || !H || !skyCv.width) return;
   const c = ctx;
   const viewTop = Math.floor(window.scrollY / PX) - 4, viewBot = viewTop + VH + 8;
+  const E = GS.eff, vit = GS.vit, day = 1 - pal.night;
   c.globalCompositeOperation = 'source-over';
   c.globalAlpha = 1;
   c.drawImage(skyCv, 0, 0);
+  rareEvents();
 
   // Sterne
   if (pal.night > 0.05) {
@@ -931,6 +1439,25 @@ function draw() {
       }
     }
   }
+  // Sternschnuppe
+  if (shooting) {
+    const e = T - shooting.t0;
+    if (e > 1.4 || pal.night < 0.3) shooting = null;
+    else {
+      const a = e < 0.2 ? e / 0.2 : Math.max(0, 1 - (e - 0.2) / 1.2);
+      for (let i = 0; i < 12; i++) {
+        const x = shooting.x + shooting.vx * (e - i * 0.018), y = shooting.y + shooting.vy * (e - i * 0.018);
+        c.fillStyle = `rgba(255,246,220,${(a * (1 - i / 12)).toFixed(2)})`;
+        c.fillRect(Math.round(x), Math.round(y), 1, 1);
+      }
+    }
+  }
+  // Regenbogen (dauerhaft ab Stufe 15, sonst als seltenes Ereignis)
+  let rb = 0;
+  if (E >= 15) rb = 0.22;
+  if (T < rainbowUntil) rb = Math.max(rb, 0.24 * Math.min(1, (rainbowUntil - T) / 6, (T - (rainbowUntil - 45)) / 6));
+  rb *= clamp(day * 1.2 - 0.1, 0, 1);
+  if (rb > 0.01 && rainbowCv) { c.globalAlpha = rb; c.drawImage(rainbowCv, 0, 0); c.globalAlpha = 1; }
   // Wolken
   for (const cl of clouds) {
     cl.x += cl.v * dt;
@@ -946,16 +1473,30 @@ function draw() {
 
   c.drawImage(landCv, 0, 0);
 
+  // Bewohner am Boden (hinter den Pflanzen)
+  if (E >= 7 && pal.night < 0.6) drawBirds(c, vit);
+  if (lowerH && lowerTop < viewBot && lowerTop + lowerH > viewTop) {
+    if (E >= 6) drawFish(c);
+    if (E >= 11) drawFountain(c);
+    if (E >= 9) drawCat(c);
+    if (E >= 13) drawHedgehog(c);
+  }
+
   // Pflanzen
   for (const s of slots) {
-    if (s.base < viewTop || s.base - SH > viewBot) continue;
+    if (s.base < viewTop || s.base - 100 > viewBot) continue;
     drawPlant(c, s);
   }
 
   // Wasser, Funken, Blütenblätter, Gießkannen
   updateFx(c);
 
-  // Licht: Lampen, Glühwürmchen, Staub
+  // Fliegende Bewohner
+  if (E >= 3 && pal.night < 0.5 && slots.length) drawButterflies(c, E, vit, viewTop, viewBot);
+  if (E >= 8 && pal.night < 0.5 && slots.length) drawBees(c, E, vit, viewTop, viewBot);
+  if (E >= 10) drawWindchime(c);
+
+  // Licht: Lampen, Laternen, Glühwürmchen, Staub
   c.globalCompositeOperation = 'lighter';
   if (pal.lamps > 0.05) {
     bulbList().forEach(([x, y], i) => {
@@ -966,9 +1507,30 @@ function draw() {
       c.fillStyle = css(BULBS[i % 4]);
       c.fillRect(x - 1, y, 3, 2);
     });
+    if (E >= 2) lanternList().forEach(([x, y, col], i) => {
+      const a = pal.lamps * (0.85 + 0.15 * Math.sin(T * 0.9 + i * 2.3));
+      c.globalAlpha = a * 0.5;
+      c.drawImage(glow(col), x - 12, y - 9, 25, 25);
+      c.globalAlpha = a * 0.7;
+      c.fillStyle = css(col); c.fillRect(x - 2, y + 1, 5, 4);
+    });
+    if (E >= 5) stoneLanterns().forEach(([x, y]) => {
+      if (y < viewTop || y > viewBot) return;
+      c.globalAlpha = pal.lamps * 0.55;
+      c.drawImage(glow([255, 200, 130]), x - 11, y - 16, 22, 22);
+      c.globalAlpha = pal.lamps * 0.8;
+      c.fillStyle = '#ffd890'; c.fillRect(x - 1, y - 6, 3, 2);
+    });
+    if (E >= 12) {
+      c.globalAlpha = pal.lamps * 0.4;
+      c.drawImage(glow([255, 204, 140]), W - 40, horizonY - 34, 38, 38);
+    }
   }
   if (pal.night > 0.25) {
-    for (const f of flies) {
+    const nF = Math.min(flies.length, Math.round((E >= 14 ? 28 : 14) * (0.4 + 0.6 * vit)) + (T < swarmUntil ? 26 : 0));
+    const gold = E >= 16;
+    for (let i = 0; i < nF; i++) {
+      const f = flies[i];
       const x = f.x * W + Math.sin(T * f.a + f.p) * 14 + Math.sin(T * f.a * 2.3) * 4;
       const y = horizonY - 8 + f.y * (H - horizonY) + Math.sin(T * f.b + f.p * 2) * 8;
       if (y < viewTop || y > viewBot) continue;
@@ -976,19 +1538,20 @@ function draw() {
       const a = (pal.night - 0.2) * bl * bl;
       if (a < 0.02) continue;
       c.globalAlpha = a * 0.75;
-      c.drawImage(glow([200, 240, 140]), x - 6, y - 6, 12, 12);
+      c.drawImage(glow(gold && i % 3 === 0 ? [255, 214, 120] : [200, 240, 140]), x - 6, y - 6, 12, 12);
       c.globalAlpha = a;
       c.fillStyle = '#f4ffc4';
       c.fillRect(Math.round(x), Math.round(y), 1, 1);
     }
   }
-  if (pal.dust > 0.05) {
+  const dustA = Math.max(pal.dust, E >= 16 ? 0.7 : 0);
+  if (dustA > 0.05) {
+    c.fillStyle = E >= 16 ? '#ffe2a0' : '#fff0d6';
     for (const d of dust) {
       d.y -= d.v * dt; d.x += Math.sin(T * 0.4 + d.p) * 0.05;
       if (d.y < 0) { d.y = H; d.x = Math.random() * W; }
       if (d.y < viewTop || d.y > viewBot) continue;
-      c.globalAlpha = pal.dust * d.a * (0.35 + 0.3 * Math.sin(T * 0.9 + d.p));
-      c.fillStyle = '#fff0d6';
+      c.globalAlpha = dustA * d.a * (0.35 + 0.3 * Math.sin(T * 0.9 + d.p));
       c.fillRect(Math.round(d.x), Math.round(d.y), 1, 1);
     }
   }
@@ -1001,6 +1564,148 @@ function cloudShape(c, x, y, s) {
   e(0, 0, 12, 3); e(-5, -1.5, 5.5, 3.5); e(3, -3, 6.5, 4.5); e(9, -1, 4, 2.6);
 }
 
+/* ---------- Tiere ---------- */
+const R1 = (c, col, x, y, w = 1, h = 1) => { c.fillStyle = css(A(col)); c.fillRect(Math.round(x), Math.round(y), w, h); };
+function drawBirds(c, vit) {
+  const n = Math.round(3 * vit), hz = horizonY;
+  for (let i = 0; i < n; i++) {
+    const b = birds[i];
+    const ph = (T * 0.45 + b.p) % 5;
+    let x = Math.round(W * b.u + Math.floor((T * 0.45 + b.p) / 5) % 3 * 3), y = hz - 9;
+    if (i === 0) { x = 6; y = hz - 23; } // sitzt auf dem Vogelhaus
+    if (ph < 0.35) y -= Math.round(Math.sin(ph / 0.35 * Math.PI) * 2);
+    const dir = Math.sin(T * 0.13 + b.p * 3) > 0 ? 1 : -1;
+    const peck = ph > 2 && ph < 2.4;
+    R1(c, b.col, x - 1, y, 3, 2);
+    R1(c, b.br, x + (dir > 0 ? 0 : -1), y + 1, 2, 1);
+    R1(c, mix(b.col, [40, 30, 40], 0.3), x - 1 - dir, y - (dir > 0 ? 0 : 0), 1, 1);
+    const hx = x + dir * 2, hy = y - 1 + (peck ? 2 : 0);
+    R1(c, b.col, hx, hy, 1, 1); R1(c, b.col, hx - dir, hy, 1, 1);
+    R1(c, [250, 176, 90], hx + dir, hy + (peck ? 1 : 0), 1, 1);
+    R1(c, [30, 24, 30], hx, hy, 1, 1);
+    R1(c, [80, 60, 60], x, y + 2, 1, 1);
+  }
+}
+function drawFish(c) {
+  const P = pondGeo();
+  for (const f of fish) {
+    const a = T * f.v + f.p;
+    const x = P.x + Math.cos(a) * P.rx * 0.55, y = P.y + Math.sin(a * 1.3) * P.ry * 0.4 + 1;
+    const dir = -Math.sin(a) > 0 ? 1 : -1;
+    c.globalAlpha = 0.85;
+    R1(c, f.col, x - 1, y, 3, 1);
+    R1(c, mix(f.col, [255, 255, 255], 0.4), x - 1 - dir * 1, y - (Math.sin(T * 6 + f.p) > 0 ? 1 : 0), 1, 1);
+    c.globalAlpha = 1;
+  }
+  // Glitzern auf dem Wasser
+  c.fillStyle = `rgba(230,246,250,${(0.35 + 0.25 * Math.sin(T * 2)).toFixed(2)})`;
+  for (let i = 0; i < 4; i++) {
+    const k = Math.floor(T * 0.8 + i * 1.7) % 7;
+    c.fillRect(Math.round(P.x - P.rx * 0.6 + k * P.rx * 0.18), P.y - 4 + (i % 3) * 3, 2, 1);
+  }
+}
+function drawFountain(c) {
+  const f = fountGeo();
+  if (spray.length < MAX_SPRAY && Math.random() < 0.7) {
+    const a = (Math.random() - 0.5) * 1.4;
+    spray.push({ x: f.x, y: f.y - 13, vx: Math.sin(a) * 9, vy: -12 - Math.random() * 6 });
+  }
+  c.fillStyle = css(A([186, 228, 240]), 0.85);
+  for (let i = spray.length - 1; i >= 0; i--) {
+    const d = spray[i];
+    d.vy += 40 * dt; d.x += d.vx * dt; d.y += d.vy * dt;
+    if (d.y > f.y) { spray.splice(i, 1); continue; }
+    c.fillRect(Math.round(d.x), Math.round(d.y), 1, 1);
+  }
+  c.fillRect(f.x, f.y - 14 - (Math.sin(T * 5) > 0 ? 1 : 0), 1, 2);
+}
+function drawCat(c) {
+  const x = Math.round(W * 0.64), y = lowerTop + 21;
+  const O = [232, 158, 100], Od = [196, 116, 76], Ol = [248, 204, 160];
+  const br = Math.sin(T * 1.6) > 0.3 ? 1 : 0;
+  pell(c, x + 1, y + 2, 6, 1.5, [60, 46, 60]); // Schatten
+  pell(c, x, y, 5, 2 + br * 0.3, O);
+  R1(c, Od, x - 2, y - 2 + (br ? 0 : 1), 1, 2); R1(c, Od, x + 1, y - 2 + (br ? 0 : 1), 1, 2); R1(c, Od, x + 3, y - 1, 1, 2);
+  R1(c, O, x - 6, y - 1, 3, 3); R1(c, Ol, x - 6, y + 1, 3, 1);
+  R1(c, O, x - 6, y - 2, 1, 1); R1(c, O, x - 4, y - 2, 1, 1);
+  R1(c, [70, 50, 60], x - 6, y, 1, 1); R1(c, [70, 50, 60], x - 4, y, 1, 1);
+  const tw = Math.sin(T * 0.9) > 0.6 ? 1 : 0; // Schwanz zuckt
+  R1(c, Od, x + 5, y + 1, 1, 1); R1(c, Od, x + 4, y + 2, 2, 1); R1(c, Od, x + 6, y + 1 - tw, 1, 1);
+  if (pal.night > 0.4) zzz(c, x - 5, y - 4, 0.8);
+}
+function drawHedgehog(c) {
+  const span = Math.max(20, W - 24), pos = (T * 2.6) % (2 * span);
+  const dir = pos < span ? 1 : -1;
+  const x = Math.round(12 + (pos < span ? pos : 2 * span - pos)), y = lowerTop + 29;
+  const step = Math.floor(T * 4) % 2;
+  R1(c, [60, 46, 60], x - 3, y + 2, 7, 1);
+  pell(c, x, y, 3.4, 1.8, [128, 98, 80]);
+  for (let i = -3; i <= 2; i += 2) R1(c, [88, 66, 58], x + i, y - 2, 1, 1);
+  R1(c, [88, 66, 58], x - 2, y - 1, 1, 1); R1(c, [88, 66, 58], x + 1, y - 1, 1, 1);
+  R1(c, [216, 188, 158], x + dir * 3, y, 2 * (dir > 0 ? 1 : 1), 1);
+  R1(c, [216, 188, 158], x + dir * 3, y + 1, 1, 1);
+  R1(c, [36, 28, 30], x + dir * 4 + (dir > 0 ? 1 : 0), y, 1, 1);
+  R1(c, [70, 52, 48], x - 2 + step, y + 2, 1, 1); R1(c, [70, 52, 48], x + 1 - step, y + 2, 1, 1);
+}
+function drawButterflies(c, E, vit, vt, vb) {
+  const n = Math.round(Math.min(5, 2 + (E - 3) * 0.35) * vit);
+  const a = clamp(1 - pal.night * 2, 0, 1);
+  c.globalAlpha = a;
+  for (let i = 0; i < n; i++) {
+    const b = butterflies[i], s = slots[(b.k * 3) % slots.length];
+    const top = s.base - 34;
+    const x = s.cx + Math.sin(T * 0.37 * b.v + b.p) * 20 + Math.sin(T * 1.3 + b.p) * 4;
+    const y = top + Math.sin(T * 0.5 * b.v + b.p * 2) * 12;
+    if (y < vt || y > vb) continue;
+    const open = Math.sin(T * 13 + b.p) > 0;
+    const X = Math.round(x), Y = Math.round(y);
+    c.fillStyle = css(A(b.col));
+    if (open) { c.fillRect(X - 2, Y - 1, 2, 2); c.fillRect(X + 1, Y - 1, 2, 2); c.fillRect(X - 2, Y + 1, 1, 1); c.fillRect(X + 2, Y + 1, 1, 1); }
+    else { c.fillRect(X - 1, Y - 2, 1, 2); c.fillRect(X + 1, Y - 2, 1, 2); }
+    c.fillStyle = css(A([60, 44, 60])); c.fillRect(X, Y - 1, 1, 3);
+  }
+  c.globalAlpha = 1;
+}
+function drawBees(c, E, vit, vt, vb) {
+  const n = Math.round(Math.min(6, 2 + (E - 8) * 0.6) * vit);
+  const flowering = slots.filter((s) => stageOf(s.p.growth) >= 3 && s.p.paused == null);
+  const pool = flowering.length ? flowering : slots;
+  c.globalAlpha = clamp(1 - pal.night * 2, 0, 1);
+  for (let i = 0; i < n; i++) {
+    const b = bees[i], s = pool[(b.k) % pool.length];
+    const x = s.cx + Math.cos(T * 1.9 * b.v + b.p) * 11 + Math.sin(T * 5 + b.p) * 1.5;
+    const y = s.base - 28 + Math.sin(T * 2.7 * b.v + b.p) * 7;
+    if (y < vt || y > vb) continue;
+    const X = Math.round(x), Y = Math.round(y);
+    c.fillStyle = css(A([250, 206, 90])); c.fillRect(X, Y, 2, 1);
+    c.fillStyle = css(A([60, 44, 50])); c.fillRect(X + (Math.cos(T * 1.9 * b.v + b.p) > 0 ? 0 : 1), Y, 1, 1);
+    if (Math.sin(T * 30 + i) > 0) { c.fillStyle = 'rgba(240,248,255,.8)'; c.fillRect(X, Y - 1, 1, 1); }
+  }
+  c.globalAlpha = 1;
+}
+function drawWindchime(c) {
+  const x = windchimeX(), y = Math.round(lightY(x)) + 1;
+  const S = [214, 218, 232], Sd = [150, 150, 176];
+  R1(c, [80, 64, 80], x, y, 1, 4);
+  R1(c, [176, 124, 92], x - 3, y + 4, 7, 1);
+  const lens = [5, 7, 6, 4];
+  [-3, -1, 1, 3].forEach((dx, i) => {
+    const sw = Math.round(Math.sin(T * 1.7 + i * 1.3) * 0.9);
+    R1(c, Sd, x + dx, y + 5, 1, 1);
+    R1(c, S, x + dx + sw, y + 6, 1, lens[i]);
+  });
+  if (Math.sin(T * 0.7) > 0.97) { c.fillStyle = 'rgba(255,255,240,.9)'; c.fillRect(x + 1, y + 7, 1, 1); }
+  R1(c, [246, 186, 206], x + Math.round(Math.sin(T * 1.2)), y + 12, 1, 2);
+}
+function zzz(c, x, y, a) {
+  for (let k = 0; k < 2; k++) {
+    const ph = ((T * 0.45 + k * 0.5) % 1);
+    const zx = Math.round(x + ph * 5 + k), zy = Math.round(y - ph * 9);
+    c.fillStyle = `rgba(236,230,255,${(a * (1 - ph)).toFixed(2)})`;
+    c.fillRect(zx, zy, 3, 1); c.fillRect(zx + 1, zy + 1, 1, 1); c.fillRect(zx, zy + 2, 3, 1);
+  }
+}
+
 function visualOf(p) {
   const v = pendingVis.get(p.id);
   if (v) return v;
@@ -1008,29 +1713,54 @@ function visualOf(p) {
 }
 
 function drawPlant(c, s) {
-  const p = s.p, vis = visualOf(p);
-  const spr = getSprite(p.species, vis.stage, vis.cond, s.flip);
-  const top = s.base - SH + 1, left = Math.round(s.cx - SW / 2);
+  const p = s.p, vis = visualOf(p), st = vis.stage;
+  const spr = getSprite(p.species, st, vis.cond, s.flip);
+  const sw = spr.width, sh = spr.height;
+  const top = s.base - sh + 1, left = Math.round(s.cx - sw / 2);
+  const paused = p.paused != null;
+  const healthy = vis.cond === 0 && !paused;
+  // goldener Schimmer hinter Riesig/Legendär
+  if (st >= 6 && healthy) {
+    c.globalCompositeOperation = 'lighter';
+    c.globalAlpha = (st - 5) * 0.11 * (0.7 + 0.6 * pal.night) * (0.85 + 0.15 * Math.sin(T * 1.2 + s.phase));
+    const gs = sw * 1.5, gy = s.base - (sh - spr.topRow) * 0.55;
+    c.drawImage(glow([255, 206, 130]), s.cx - gs / 2, gy - gs / 2, gs, gs);
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+  }
   // weicher Schatten
   c.fillStyle = 'rgba(30,16,40,.28)';
-  c.beginPath(); c.ellipse(s.cx, s.base + 0.5, 5 + vis.stage * 1.6, 1.4, 0, 0, Math.PI * 2); c.fill();
-  let amp = [1.1, 0.6, 0.2][vis.cond];
+  c.beginPath(); c.ellipse(s.cx, s.base + 0.5, 5 + Math.min(st, 5) * 1.6, 1.4, 0, 0, Math.PI * 2); c.fill();
+  let amp = paused ? 0.25 : [1.1, 0.6, 0.2][vis.cond];
   const wt = wiggle.get(p.id);
   if (wt != null) {
     const e = T - wt;
     if (e > 3) wiggle.delete(p.id);
     else amp += 2.4 * Math.exp(-e * 1.5) * Math.sin(e * 9);
   }
-  const sw = Math.sin(T * 0.8 + s.phase) + 0.35 * Math.sin(T * 1.9 + s.phase * 1.7);
-  const tr = spr.topRow, span = Math.max(1, SH - 1 - tr);
-  for (let y = tr; y < SH; y++) {
-    const f = (SH - 1 - y) / span;
-    const off = Math.round(amp * sw * f * f);
-    c.drawImage(spr, 0, y, SW, 1, left + off, top + y, SW, 1);
+  const swy = Math.sin(T * 0.8 + s.phase) + 0.35 * Math.sin(T * 1.9 + s.phase * 1.7);
+  const tr = spr.topRow, span = Math.max(1, sh - 1 - tr);
+  const step = sh > 60 ? 2 : 1; // große Sprites in Doppelzeilen: halb so viele Aufrufe
+  for (let y = tr; y < sh; y += step) {
+    const f = (sh - 1 - y) / span;
+    const off = Math.round(amp * swy * f * f);
+    const hh = Math.min(step, sh - y);
+    c.drawImage(spr, 0, y, sw, hh, left + off, top + y, sw, hh);
   }
-  // Kirschblüten fallen
-  if (p.species === 'kirschbaum' && vis.stage >= 3 && vis.cond === 0 && Math.random() < dt * 0.5 && petals.length < 40) {
-    petals.push({ x: s.cx + (Math.random() - 0.5) * 26, y: s.base - 30 - Math.random() * 8, ground: s.base + 1, p: Math.random() * 6, life: 0 });
+  if (paused) zzz(c, s.cx + 4, top + tr - 2, 0.9);
+  if (!healthy) return;
+  const r = Math.random();
+  // Funkeln bei Prächtig und mehr
+  if (st >= 5 && sparks.length < MAX_SPARKS && r < dt * (st - 4) * 0.8) {
+    sparks.push({ x: s.cx + (Math.random() - 0.5) * sw * 0.75, y: top + tr + Math.random() * (sh - tr) * 0.7, vx: 0, vy: -3, life: 0, max: 1.3, col: '255,228,150', star: Math.random() < 0.5, g: 0 });
+  }
+  // Bonus-Glitzern: mehr als das Wochenziel gegossen
+  if (p.goal < 7 && sparks.length < MAX_SPARKS && Math.random() < dt * 0.9 && weekCount(p) > p.goal) {
+    sparks.push({ x: s.cx + (Math.random() - 0.5) * sw * 0.6, y: top + tr + Math.random() * (sh - tr) * 0.8, vx: 0, vy: -2, life: 0, max: 1.1, col: '206,240,255', star: true, g: 0 });
+  }
+  // Kirschblüten fallen – ab Legendär ein richtiger Blütenregen
+  if (p.species === 'kirschbaum' && st >= 3 && petals.length < MAX_PETALS && Math.random() < dt * [0, 0, 0, 0.5, 0.5, 1.1, 1.8, 3.6][st]) {
+    petals.push({ x: s.cx + (Math.random() - 0.5) * sw * 0.7, y: top + tr + 4 + Math.random() * 8, ground: s.base + 1 + Math.random() * 3, p: Math.random() * 6, life: 0 });
   }
 }
 
@@ -1042,7 +1772,7 @@ function updateFx(c) {
     if (e > 1.75) { cans.splice(i, 1); continue; }
     const tilt = e < 0.3 ? -0.75 * (e / 0.3) : e < 1.15 ? -0.75 + 0.06 * Math.sin(e * 12) : -0.75 * Math.max(0, 1 - (e - 1.15) / 0.4);
     const alpha = e < 0.18 ? e / 0.18 : e > 1.45 ? Math.max(0, 1 - (e - 1.45) / 0.3) : 1;
-    const px = s.cx + 10, py = Math.max(8, s.base - SH + k.top - 7);
+    const px = s.cx + 10, py = Math.max(8, s.base - k.sh + k.top - 7);
     c.save();
     c.globalAlpha = alpha;
     c.translate(Math.round(px), Math.round(py - (e < 0.3 ? (1 - e / 0.3) * 3 : 0)));
@@ -1065,7 +1795,7 @@ function updateFx(c) {
     d.vy += 150 * dt; d.x += d.vx * dt; d.y += d.vy * dt;
     if (d.y >= d.ground) {
       drops.splice(i, 1);
-      if (Math.random() < 0.5) sparks.push({ x: d.x, y: d.ground, vx: (Math.random() - 0.5) * 14, vy: -10 - Math.random() * 10, life: 0, max: 0.35, col: '170,226,240', g: 90 });
+      if (Math.random() < 0.5 && sparks.length < MAX_SPARKS) sparks.push({ x: d.x, y: d.ground, vx: (Math.random() - 0.5) * 14, vy: -10 - Math.random() * 10, life: 0, max: 0.35, col: '170,226,240', g: 90 });
       continue;
     }
     c.fillRect(Math.round(d.x), Math.round(d.y), 1, 2);
@@ -1097,17 +1827,24 @@ function updateFx(c) {
 }
 
 function onWatered(k) {
-  const s = k.s, p = s.p;
+  const s = k.s, p = s.p, res = k.res || {};
   pendingVis.delete(p.id);
   wiggle.set(p.id, T);
-  const n = k.res && k.res.grew ? 18 : 10;
-  for (let i = 0; i < n; i++) {
+  const n = res.grew ? 18 : res.bonus ? 16 : 10;
+  for (let i = 0; i < n && sparks.length < MAX_SPARKS; i++) {
     const a = Math.random() * Math.PI * 2;
-    sparks.push({ x: s.cx + Math.cos(a) * 6, y: s.base - 12 - Math.random() * 14, vx: Math.cos(a) * 8, vy: -8 - Math.random() * 10, life: 0, max: 0.9 + Math.random() * 0.5, col: '255,240,200', star: Math.random() < 0.4, g: 0 });
+    sparks.push({ x: s.cx + Math.cos(a) * 6, y: s.base - 12 - Math.random() * 14, vx: Math.cos(a) * 8, vy: -8 - Math.random() * 10, life: 0, max: 0.9 + Math.random() * 0.5, col: res.bonus ? '206,240,255' : '255,240,200', star: Math.random() < 0.4, g: 0 });
   }
-  renderLand();
-  updateUI();
+  if (res.levelUp || (res.grew && res.stage >= 5)) refresh(); // Platz und Deko neu verteilen
+  else { renderLand(); updateUI(); }
   if (k.msg) toast(k.msg);
+  if (res.levelUp) celebrate(res.levelUp);
+}
+function celebrate(L) {
+  const d = DEKO.find((x) => x.lv === L);
+  const vt = Math.floor(window.scrollY / PX);
+  for (let i = 0; i < 4; i++) burst(W * (0.2 + 0.2 * i), vt + VH * (0.3 + 0.1 * (i % 2)), 12, '255,226,150', 14);
+  toastLater(`Garten-Stufe ${L}${d ? ': ' + d.name + '!' : '!'}`);
 }
 
 /* ------------------------------------------------------------------ Gießen */
@@ -1121,18 +1858,22 @@ function giessen(p) {
   if (!res) return;
   const name = nameOf(p);
   let msg;
-  if (res.grew) msg = `${name} ist gewachsen: ${SPECIES[p.species].stages[res.stage]}.`;
+  if (res.grew) msg = res.stage >= 5 ? `${name} wird ${stageName(p.species, res.stage)}!` : `${name} ist gewachsen: ${stageName(p.species, res.stage)}.`;
   else if (res.revived) msg = `${name} richtet sich wieder auf.`;
   else if (res.drooped) msg = `${name} hebt die Blätter wieder.`;
+  else if (res.bonus) msg = `Extra-Schluck für ${name}. Es glitzert.`;
+  else if (res.weekDone) msg = `Wochenziel für ${name} geschafft.`;
   else msg = LOB[Math.floor(Math.random() * LOB.length)];
   plip();
   if (s && raf) {
     pendingVis.set(p.id, old);
     const spr = getSprite(p.species, old.stage, old.cond, s.flip);
-    cans.push({ s, t0: T, top: spr.topRow, res, msg, done: false });
+    cans.push({ s, t0: T, top: spr.topRow, sh: spr.height, res, msg, done: false });
     updateUI(true);
   } else {
-    renderLand(); updateUI(); toast(msg);
+    if (res.levelUp || res.grew) refresh(); else { renderLand(); updateUI(); }
+    toast(msg);
+    if (res.levelUp) celebrate(res.levelUp);
   }
 }
 
@@ -1170,15 +1911,16 @@ function updateUI(skipLabelsState) {
   let text;
   if (!plants.length) text = 'Dein Garten wartet auf die erste Pflanze.';
   else {
-    const durst = plants.filter((p) => !wateredToday(p, t));
+    const durst = plants.filter((p) => thirsty(p, t));
     const welk = plants.filter((p) => condition(p, t) === 2);
-    if (!durst.length) text = ph === 'nacht' ? 'Alles gegossen. Der Garten schläft zufrieden.' : 'Alles gegossen. Der Garten ist zufrieden.';
+    if (!durst.length) text = ph === 'nacht' ? 'Alles versorgt. Der Garten schläft zufrieden.' : 'Alles versorgt. Der Garten ist zufrieden.';
     else if (welk.length) text = 'Ein paar Pflanzen lassen den Kopf hängen. Ein Schluck Wasser hilft.';
     else if (durst.length === 1) text = `${nameOf(durst[0])} hat noch Durst.`;
     else text = 'Ein paar Pflanzen haben noch Durst.';
   }
   $('gruss').textContent = `${hallo} ${text}`;
   $('leer').hidden = plants.length > 0;
+  renderBadge();
   renderLabels();
   renderDebug();
 }
@@ -1189,7 +1931,9 @@ function renderLabels() {
     const p = s.p;
     const cls = ['schild'];
     if (wateredToday(p, t)) cls.push('gegossen');
+    else if (p.goal < 7 && weekCount(p, t) >= p.goal) cls.push('satt');
     if (condition(p, t) === 2) cls.push('welk');
+    if (p.paused != null) cls.push('pause');
     const b = el('button', { class: cls.join(' '), type: 'button', 'aria-label': `${nameOf(p)} – Details` }, el('span', null, nameOf(p)));
     b.style.left = s.cx * PX + 'px';
     b.style.top = (s.base + 10) * PX + 'px';
@@ -1198,12 +1942,56 @@ function renderLabels() {
   }));
 }
 
-let toastTimer = 0;
-function toast(msg) {
+let toastTimer = 0, toastQ = [];
+function showToast(msg) {
   toastEl.textContent = msg;
   toastEl.classList.add('zeigen');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.remove('zeigen'), 2800);
+  toastTimer = setTimeout(() => {
+    toastEl.classList.remove('zeigen');
+    if (toastQ.length) toastTimer = setTimeout(() => showToast(toastQ.shift()), 420);
+  }, 2800);
+}
+function toast(msg) { toastQ = []; showToast(msg); }
+/** Hängt eine Meldung hinten an, statt die laufende zu überschreiben. */
+function toastLater(msg) {
+  if (toastEl.classList.contains('zeigen') || toastQ.length) toastQ.push(msg); else showToast(msg);
+}
+
+/* Garten-Stufe oben im Kopf */
+function renderBadge() {
+  const L = gardenLevel(), vit = vitality(), eff = effLevel(L, vit);
+  const b = $('stufe');
+  const cur = xpFor(L), nxt = xpFor(Math.min(LEVEL_MAX, L + 1));
+  const prog = L >= LEVEL_MAX ? 1 : clamp((state.garden.xp - cur) / (nxt - cur), 0, 1);
+  b.hidden = !state.garden.plants.length && L === 0;
+  b.replaceChildren(
+    el('span', { class: 'stufe-zahl' }, `Stufe ${L}`),
+    el('span', { class: 'stufe-balken' }, el('span', { style: `width:${Math.round(levelOverride != null ? 100 : prog * 100)}%` })),
+    eff < L ? el('span', { class: 'stufe-weg' }, 'ein paar sind ausgeflogen') : ''
+  );
+  b.setAttribute('aria-label', `Garten-Stufe ${L} von ${LEVEL_MAX}. Details`);
+}
+function openLevel() {
+  openSheet((b) => {
+    const L = gardenLevel(), vit = vitality(), eff = effLevel(L, vit);
+    b.setAttribute('aria-label', 'Dein Garten');
+    const next = DEKO.find((d) => d.lv > L);
+    const list = el('ul', { class: 'deko-liste' });
+    for (const d of DEKO) {
+      const cls = d.lv <= eff ? 'da' : d.lv <= L ? 'weg' : 'zu';
+      list.append(el('li', { class: cls }, el('span', { class: 'deko-lv' }, String(d.lv)),
+        el('span', null, d.lv <= L ? d.name : '???'),
+        cls === 'weg' ? el('span', { class: 'deko-hinweis' }, 'ausgeflogen') : null));
+    }
+    const intro = L >= LEVEL_MAX ? 'Dein Garten ist legendär. Mehr geht nicht – nur noch genießen.'
+      : `Jedes Gießen bringt deinen Garten weiter. Als Nächstes: ${next.name}.`;
+    const welk = eff < L ? 'Gerade lassen viele Pflanzen den Kopf hängen, deshalb sind ein paar Bewohner ausgeflogen. Sie kommen zurück, sobald der Garten wieder frisch ist.' : null;
+    const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Schließen');
+    zu.addEventListener('click', closeSheet);
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText(`Stufe ${L}`, 3)),
+      el('p', { class: 'stimmung' }, intro), welk ? el('p', { class: 'stimmung leise' }, welk) : '', list, el('div', { class: 'reihe' }, zu));
+  });
 }
 
 let sheetToken = 0;
@@ -1246,6 +2034,9 @@ function openNew() {
       });
       grid.append(btn);
     }
+    let goal = SPECIES[chosen].goal, goalTouched = false;
+    const rh = rhythmPicker(() => goal, (g) => { goal = g; goalTouched = true; }, () => chosen);
+    grid.addEventListener('click', () => { if (!goalTouched) { goal = SPECIES[chosen].goal; } rh.update(); });
     const ok = el('button', { class: 'knopf haupt', type: 'button' }, 'Einpflanzen');
     const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Abbrechen');
     let gepflanzt = false;
@@ -1258,19 +2049,49 @@ function openNew() {
         return;
       }
       gepflanzt = true;
-      addPlant(name, chosen);
+      addPlant(name, chosen, goal);
       closeSheet();
     });
     ab.addEventListener('click', closeSheet);
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') ok.click(); });
-    b.append(inp, grid, el('div', { class: 'reihe' }, ab, ok));
+    b.append(inp, grid, rh.node, el('div', { class: 'reihe' }, ab, ok));
     if (!matchMedia('(pointer: coarse)').matches) setTimeout(() => inp.focus(), 60);
   });
 }
 
+/** Auswahl täglich / 5× / 3× / 2× / 1× mit verspieltem Hinweis zur Pflanzenart. */
+function rhythmPicker(get, set, species) {
+  const hint = el('p', { class: 'rhythmus-hinweis' });
+  const row = el('div', { class: 'rhythmen', role: 'group', 'aria-label': 'Wie oft gießen?' });
+  const btns = GOALS.map((g) => {
+    const bt = el('button', { class: 'chip', type: 'button', 'data-g': String(g) }, GOAL_SHORT[g]);
+    bt.addEventListener('click', () => { set(g); update(); });
+    row.append(bt);
+    return bt;
+  });
+  function update() {
+    const g = get(), sp = SPECIES[species()];
+    btns.forEach((bt) => bt.setAttribute('aria-pressed', String(+bt.dataset.g === g)));
+    const sug = sp.goal === g ? 'passt' : `Vorschlag: ${GOAL_SHORT[sp.goal]}`;
+    hint.textContent = `Gießen ${GOAL_LABEL[g]} · ${sp.name} ist ${sp.durst} (${sug})`;
+  }
+  update();
+  return { node: el('div', { class: 'rhythmus' }, hint, row), update };
+}
+
+function weekText(p, t) {
+  if (p.paused != null) return 'Macht gerade Pause. Welkt nicht.';
+  if (p.goal >= 7) return wateredToday(p, t) ? 'Täglich · heute erledigt' : 'Täglich · heute noch offen';
+  const n = weekCount(p, t);
+  const drops = '💧'.repeat(Math.min(n, p.goal)) + '○'.repeat(Math.max(0, p.goal - n)) + (n > p.goal ? ' ✨' : '');
+  return `Diese Woche ${drops}  ${n} von ${p.goal}`;
+}
+
 function moodText(p, st, cond, wt) {
   const night = phaseOf(currentHour()) === 'nacht';
+  if (p.paused != null) return night ? 'Schläft unter ihrer Decke. Gute Erholung.' : 'Ruht sich aus. Nichts verpasst, nichts welkt.';
   if (wt) return night ? 'Heute schon gegossen. Sie schläft zufrieden.' : 'Heute schon gegossen. Sie sonnt sich.';
+  if (p.goal < 7 && cond === 0 && weekCount(p) >= p.goal) return 'Wochenziel geschafft. Ein Extra-Schluck bringt sie zum Glitzern.';
   if (st === 0 && p.lastWatered == null) return 'Ein Samen in der Erde. Gieß ihn, dann keimt er bald.';
   if (cond === 2) return 'Ist welk, aber nicht verloren. Einmal gießen holt sie zurück.';
   if (cond === 1) return 'Lässt die Blätter hängen. Ein Schluck Wasser hilft.';
@@ -1285,7 +2106,8 @@ function openPlant(p) {
     prev.className = 'vorschau';
     const nameEl = el('h2', { class: 'pflanzen-name' }, nameOf(p));
     const info = el('div', null, nameEl,
-      el('p', { class: 'meta' }, `${SPECIES[p.species].name} · ${SPECIES[p.species].stages[st]}`),
+      el('p', { class: 'meta' }, `${SPECIES[p.species].name} · ${stageName(p.species, st)}`),
+      el('p', { class: 'woche' }, weekText(p, t)),
       el('p', { class: 'stimmung' }, moodText(p, st, cond, wt)));
     const g = el('button', { class: 'knopf haupt', type: 'button' }, wt ? 'Heute gegossen' : 'Gießen');
     g.disabled = wt;
@@ -1325,12 +2147,37 @@ function openPlant(p) {
       area.replaceChildren(el('p', { class: 'frage' }, `${nameOf(p)} wirklich aus dem Garten nehmen?`), no, yes);
     };
     showButtons();
-    b.append(el('div', { class: 'pflanze-kopf' }, prev, info), el('div', { class: 'reihe' }, g), area);
+    const rh = rhythmPicker(() => p.goal, (gg) => {
+      if (gg === p.goal) return;
+      p.goal = gg; saveState(); renderLand(); updateUI();
+      b.querySelector('.woche').textContent = weekText(p, today());
+      toast(`${nameOf(p)}: jetzt ${GOAL_LABEL[gg]}.`);
+    }, () => p.species);
+    const pz = el('button', { class: 'knopf pause-knopf', type: 'button' }, p.paused != null ? 'Pause beenden' : 'Pause (Urlaub, krank …)');
+    pz.addEventListener('click', () => {
+      if (pz.dataset.done) return; // Doppeltipp-Schutz
+      pz.dataset.done = '1';
+      togglePause(p);
+      closeSheet();
+    });
+    b.append(el('div', { class: 'pflanze-kopf' }, prev, info), el('div', { class: 'reihe' }, g), rh.node, el('div', { class: 'reihe' }, pz), area);
   });
 }
 
-function addPlant(name, sp) {
-  const p = { id: uid(), species: sp, plantedDay: today(), lastWatered: null, growth: 0 };
+function togglePause(p) {
+  const t = today();
+  if (p.paused != null) {
+    p.paused = null; p.resumeDay = t;
+    toast(`${nameOf(p)} ist wieder wach.`);
+  } else {
+    p.paused = t;
+    toast(`${nameOf(p)} macht Pause und welkt nicht.`);
+  }
+  saveState();
+  renderLand(); updateUI();
+}
+function addPlant(name, sp, goal) {
+  const p = migratePlant({ id: uid(), species: sp, plantedDay: today(), lastWatered: null, growth: 0, goal: goal || SPECIES[sp].goal });
   state.garden.plants.push(p);
   state.privat.names[p.id] = name;
   saveState();
@@ -1338,7 +2185,7 @@ function addPlant(name, sp) {
   toast(`${name} ist eingepflanzt. Gieß sie gleich zum ersten Mal.`);
   const s = slots.find((x) => x.p.id === p.id);
   if (s) {
-    const y = (s.base - SH) * PX;
+    const y = (s.base - spriteH(stageOf(p.growth))) * PX;
     if (y + 200 > window.scrollY + innerHeight) window.scrollTo({ top: Math.max(0, y - 120), behavior: 'smooth' });
   }
 }
@@ -1364,8 +2211,8 @@ function plantAt(e) {
   let best = null, bd = 1e9;
   for (const s of slots) {
     const spr = getSprite(s.p.species, visualOf(s.p).stage, visualOf(s.p).cond, s.flip);
-    const topY = s.base - SH + 1 + spr.topRow - 3;
-    if (x < s.cx - 17 || x > s.cx + 17 || y < Math.min(topY, s.base - 14) || y > s.base + 8) continue;
+    const topY = s.base - spr.height + 1 + spr.topRow - 3, hw = Math.max(17, spr.width * 0.4);
+    if (x < s.cx - hw || x > s.cx + hw || y < Math.min(topY, s.base - 14) || y > s.base + 8) continue;
     const d = Math.abs(x - s.cx);
     if (d < bd) { bd = d; best = s; }
   }
@@ -1375,7 +2222,7 @@ canvas.addEventListener('click', (e) => {
   const s = plantAt(e);
   if (!s) return;
   if (cans.some((k) => k.s.p.id === s.p.id)) return;
-  if (wateredToday(s.p)) openPlant(s.p);
+  if (wateredToday(s.p) || s.p.paused != null) openPlant(s.p);
   else giessen(s.p);
 });
 canvas.addEventListener('mousemove', (e) => { canvas.classList.toggle('zeiger', !!plantAt(e)); });
@@ -1386,15 +2233,52 @@ function renderDebug() {
   if (!DEBUG) return;
   box.hidden = false;
   const mk = (txt, fn) => { const b = el('button', { type: 'button' }, txt); b.addEventListener('click', fn); return b; };
+  const L = gardenLevel();
   box.replaceChildren(
     el('span', null, `Tag ${dayOffset >= 0 ? '+' : ''}${dayOffset}`),
     mk('−1', () => setDebug(dayOffset - 1, hourOverride)),
     mk('+1', () => setDebug(dayOffset + 1, hourOverride)),
+    mk('+7', () => setDebug(dayOffset + 7, hourOverride)),
     el('span', null, ` Zeit ${hourOverride == null ? 'echt' : hourOverride.toFixed(1).replace('.', ',')}`),
     mk('−3h', () => setDebug(dayOffset, ((hourOverride == null ? currentHour() : hourOverride) - 3 + 24) % 24)),
     mk('+3h', () => setDebug(dayOffset, ((hourOverride == null ? currentHour() : hourOverride) + 3) % 24)),
-    mk('echt', () => setDebug(0, null))
+    mk('echt', () => { levelOverride = null; setDebug(0, null); }),
+    el('span', null, ` Stufe ${L}${levelOverride != null ? '*' : ''}`),
+    mk('−', () => setLevelOverride(Math.max(0, L - 1))),
+    mk('+', () => setLevelOverride(Math.min(LEVEL_MAX, L + 1))),
+    mk('+1 Wo gießen', () => simulateWeeks(1)),
+    mk('+4 Wo', () => simulateWeeks(4)),
+    mk('Ereignis', debugEvent)
   );
+}
+function setLevelOverride(L) {
+  levelOverride = L;
+  const u = new URL(location.href);
+  u.searchParams.set('level', String(L));
+  history.replaceState(null, '', u.toString());
+  refresh();
+}
+/** Simuliert Pflege: jede Pflanze wird an ihren Wochentagen gegossen (täglich, Mo–Fr, Mo/Mi/Fr, Mo/Do, Mo). */
+function simulateWeeks(n) {
+  const L0 = levelOfXp(state.garden.xp);
+  for (let i = 0; i < 7 * n; i++) {
+    dayOffset++;
+    const t = today(), wd = weekday(t);
+    for (const p of state.garden.plants) {
+      if (p.paused != null) continue;
+      if (GOAL_DAYS[p.goal].includes(wd)) water(p, t);
+    }
+  }
+  saveState();
+  setDebug(dayOffset, hourOverride);
+  const L1 = levelOfXp(state.garden.xp);
+  toast(`${n} Woche${n > 1 ? 'n' : ''} gepflegt. Garten-Stufe ${L1}${L1 > L0 ? ' (+' + (L1 - L0) + ')' : ''}.`);
+  if (L1 > L0 && levelOverride == null) celebrate(L1);
+}
+function debugEvent() {
+  eventToastShown = {};
+  if (pal.night > 0.5) { startShootingStar(); swarmUntil = T + 30; }
+  else { rainbowUntil = T + 45; eventToast('rain', 'Ein Regenbogen über deinem Garten.'); }
 }
 function setDebug(off, hour) {
   dayOffset = off; hourOverride = hour;
@@ -1402,10 +2286,10 @@ function setDebug(off, hour) {
   u.searchParams.set('debug', '1');
   if (off) u.searchParams.set('tag', (off > 0 ? '+' : '') + off); else u.searchParams.delete('tag');
   if (hour != null) u.searchParams.set('zeit', String(Math.round(hour * 10) / 10)); else u.searchParams.delete('zeit');
+  if (levelOverride == null) u.searchParams.delete('level');
   history.replaceState(null, '', u.toString());
   pendingVis.clear();
-  renderLayers();
-  updateUI();
+  refresh();
 }
 
 /* ------------------------------------------------------------------ Start */
@@ -1422,11 +2306,14 @@ function makeGrain() {
 }
 
 function init() {
+  const raw = localStorage.getItem(STORE_KEY);
   state = loadState();
+  if (raw && !raw.includes('"schema":2')) saveState(); // 1.0-Daten gleich im neuen Format sichern
   $('titel').append(pixelText('Gewohnheits-Garten', innerWidth < 400 ? 2 : 3));
   $('neu').append(pixelText('+', 5, true));
   $('neu').addEventListener('click', openNew);
   $('leer-neu').addEventListener('click', openNew);
+  $('stufe').addEventListener('click', openLevel);
   $('version').textContent = VERSION;
   makeGrain();
   refresh();
@@ -1458,6 +2345,15 @@ function init() {
   }
 }
 
-window.garten = { snapshot: gardenSnapshot, version: VERSION, sprite: previewCanvas };
+window.garten = {
+  snapshot: gardenSnapshot, version: VERSION, sprite: previewCanvas,
+  // nur für Tests/Debug
+  _state: () => state, _simulate: simulateWeeks, _refresh: () => { state = loadState(); refresh(); },
+  _setDay: (o) => { dayOffset = o; pendingVis.clear(); refresh(); return today(); },
+  _water: (id) => { const p = state.garden.plants.find((x) => x.id === id); const r = water(p); saveState(); return r; },
+  _pause: (id) => togglePause(state.garden.plants.find((x) => x.id === id)),
+  _cond: (id) => condition(state.garden.plants.find((x) => x.id === id)),
+  _draw: () => draw()
+};
 init();
 })();
