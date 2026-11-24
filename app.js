@@ -1,4 +1,4 @@
-/* Gewohnheits-Garten 1.2 „Nachbarschaft“
+/* Gewohnheits-Garten 1.3 „Foto-Nachweis“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage.
@@ -11,14 +11,15 @@
      ?mock=a      Nachbarschaft ohne Supabase: Fake-Backend in localStorage. Jeder Profilname
                   (a, b, …) ist ein eigenes „Gerät“ mit eigenem Garten – zwei Tabs mit
                   ?mock=a und ?mock=b sehen sich gegenseitig. garten._fakeNachbar() legt
-                  erfundene Nachbargärten an.
+                  erfundene Nachbargärten an (mit ein paar Fotos). garten._fakeFoto() macht ein
+                  Testfoto ohne Kamera (auch Knopf „📸“ im Debug-Feld).
    Mit einem dieser Parameter erscheint oben links ein Feld mit Tag, Uhrzeit, Stufe,
    „+1 Wo gießen“ (simuliert eine Woche Pflege für alle Pflanzen) und „Ereignis“.
 */
 'use strict';
 (function () {
 
-const VERSION = '1.2';
+const VERSION = '1.3';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -142,6 +143,7 @@ function gardenSnapshot() {
   const t = today();
   const own = state.garden.plants;
   const L = levelOfXp(state.garden.xp), vit = vitality(t, own);
+  const fotos = fotoSnapshotMap(t); // 1.3: nur Tag + Mini-Bild, Vollbild erst beim Antippen
   return {
     v: 2,
     id: state.garden.id,
@@ -158,7 +160,8 @@ function gardenSnapshot() {
       week: weekCount(p, t), paused: p.paused != null,
       // Rohdaten, damit Nachbarn den Zustand auch Tage später richtig sehen (keine Namen!)
       last: p.lastWatered, planted: p.plantedDay, resume: p.resumeDay,
-      days: p.days.filter((d) => d > t - 14 && d <= t)
+      days: p.days.filter((d) => d > t - 14 && d <= t),
+      ...(fotos.has(p.id) ? { foto: fotos.get(p.id) } : {})
     }))
   };
 }
@@ -1867,6 +1870,7 @@ function onWatered(k) {
   else { renderLand(); updateUI(); }
   if (k.msg) toast(k.msg);
   if (res.levelUp) celebrate(res.levelUp);
+  if (!view) showNachweis(p);
 }
 function celebrate(L) {
   const d = DEKO.find((x) => x.lv === L);
@@ -1902,6 +1906,7 @@ function giessen(p) {
     if (res.levelUp || res.grew) refresh(); else { renderLand(); updateUI(); }
     toast(msg);
     if (res.levelUp) celebrate(res.levelUp);
+    showNachweis(p);
   }
 }
 
@@ -1970,7 +1975,8 @@ function renderLabels() {
     b.style.top = (s.base + 10) * PX + 'px';
     b.addEventListener('click', () => view ? toast(plantInfo(p)) : openPlant(p));
     return b;
-  }));
+  }), ...slots.map((s) => { const f = fotoOf(s.p); return f ? fotoPin(s, f) : null; }).filter(Boolean));
+  if (!view && fotosLoaded && [...fotoIdx.values()].some((m) => !fotoFresh(m.day, t))) purgeFotos();
 }
 
 let toastTimer = 0, toastQ = [];
@@ -2029,7 +2035,8 @@ let sheetToken = 0;
 function openSheet(build) {
   const tok = ++sheetToken;
   overviewOpen = false; nbConfirming = false;
-  blatt.classList.remove('nachbarschaft');
+  hideNachweis();
+  blatt.classList.remove('nachbarschaft', 'foto-blatt');
   blatt.replaceChildren();
   build(blatt);
   blatt.inert = false;
@@ -2194,7 +2201,21 @@ function openPlant(p) {
       togglePause(p);
       closeSheet();
     });
-    b.append(el('div', { class: 'pflanze-kopf' }, prev, info), el('div', { class: 'reihe' }, g), rh.node, el('div', { class: 'reihe' }, pz), area);
+    // 1.3: Foto von heute (freiwillig)
+    const fo = fotoOf(p);
+    const cam = el('button', { class: 'knopf foto-knopf', type: 'button' }, fo && fo.d === t ? '📸 Neues Foto von heute' : '📸 Foto von heute');
+    cam.addEventListener('click', () => fotoStart(p, false));
+    const gal = el('button', { class: 'knopf leise klein', type: 'button' }, 'aus der Galerie');
+    gal.addEventListener('click', () => fotoStart(p, true));
+    const fotoRow = el('div', { class: 'reihe foto-reihe' });
+    if (fo) {
+      const ansehen = el('button', { class: 'foto-mini', type: 'button', 'aria-label': `Foto ansehen (${dayAgo(fo.d)})` },
+        fo.t ? el('img', { src: fo.t, alt: '', width: '40', height: '40' }) : '📸', el('span', null, dayAgo(fo.d)));
+      ansehen.addEventListener('click', () => openFoto(p));
+      fotoRow.append(ansehen);
+    }
+    fotoRow.append(cam, gal);
+    b.append(el('div', { class: 'pflanze-kopf' }, prev, info), el('div', { class: 'reihe' }, g), rh.node, el('div', { class: 'reihe' }, pz), fotoRow, area);
   });
 }
 
@@ -2226,6 +2247,7 @@ function addPlant(name, sp, goal) {
 function removePlant(p) {
   state.garden.plants = state.garden.plants.filter((x) => x.id !== p.id);
   delete state.privat.names[p.id];
+  if (fotoIdx.has(p.id)) deleteFoto(p);
   pendingVis.delete(p.id);
   saveState();
   refresh();
@@ -2283,7 +2305,8 @@ function renderDebug() {
     mk('+', () => setLevelOverride(Math.min(LEVEL_MAX, L + 1))),
     mk('+1 Wo gießen', () => simulateWeeks(1)),
     mk('+4 Wo', () => simulateWeeks(4)),
-    mk('Ereignis', debugEvent)
+    mk('Ereignis', debugEvent),
+    view ? '' : mk('📸', () => fakeFoto())
   );
 }
 function setLevelOverride(L) {
@@ -2416,19 +2439,69 @@ const backend = {
     }
     const rows = await sbRpc('get_gardens', { p_ids: ids });
     return Array.isArray(rows) ? rows : [];
+  },
+  // Fotos (1.3) – ohne Storage-Bucket, base64 in der Tabelle photos
+  async putFoto(gid, token, pid, day, mime, data) {
+    if (MOCK) {
+      await mockWait();
+      if (navigator.onLine === false) throw new Error('offline');
+      mockCheckToken(gid, token);
+      if (!FOTO_MIMES.includes(mime) || data.length > 90000) { const e = new Error('ungueltig'); e.status = 400; throw e; }
+      const db = mockFotos(), t = today();
+      for (const g of Object.keys(db)) { // wie der Server: Abgelaufenes bei jedem Aufruf löschen
+        for (const k of Object.keys(db[g])) if (!fotoFresh(db[g][k].day, t)) delete db[g][k];
+        if (!Object.keys(db[g]).length) delete db[g];
+      }
+      const g = db[gid] = db[gid] || {};
+      g[pid] = { day, mime, data, at: Date.now() };
+      const keys = Object.keys(g).sort((a, b) => g[b].at - g[a].at);
+      keys.slice(30).forEach((k) => delete g[k]);
+      mockFotosSave(db);
+      return true;
+    }
+    return sbRpc('upsert_photo', { p_garden: gid, p_token: token, p_plant: pid, p_taken_on: isoDay(day), p_mime: mime, p_data: data });
+  },
+  async delFoto(gid, token, pid) {
+    if (MOCK) {
+      await mockWait();
+      if (navigator.onLine === false) throw new Error('offline');
+      mockCheckToken(gid, token);
+      const db = mockFotos();
+      if (db[gid]) { delete db[gid][pid]; mockFotosSave(db); }
+      return true;
+    }
+    return sbRpc('delete_photo', { p_garden: gid, p_token: token, p_plant: pid });
+  },
+  /** -> { mime, data, day } oder null (nicht da oder älter als 7 Tage) */
+  async getFoto(gid, pid) {
+    if (MOCK) {
+      await mockWait();
+      if (navigator.onLine === false) throw new Error('offline');
+      const r = (mockFotos()[gid] || {})[pid];
+      return r && fotoFresh(r.day) ? { mime: r.mime, data: r.data, day: r.day } : null;
+    }
+    const rows = await sbRpc('get_photo', { p_garden: gid, p_plant: pid });
+    const r = Array.isArray(rows) ? rows[0] : rows;
+    return r && r.data ? { mime: r.mime, data: r.data, day: dayOfIso(r.taken_on) } : null;
   }
 };
 
 /* ---------- Hochladen: gedrosselt, nur bei Änderung, offline später ---------- */
 let syncTimer = 0, syncBusy = false, syncAgain = false, lastSyncAt = 0, syncHintShown = false;
+/** Größe so, wie Postgres sie prüft: jsonb::text setzt nach jedem „:“ und „,“ ein Leerzeichen. */
+const snapSize = (json) => json.length + (json.match(/[:,]/g) || []).length;
 function snapshotForUpload() {
   const snap = gardenSnapshot();
   let json = JSON.stringify(snap);
-  if (json.length > SNAP_MAX) { // sehr großer Garten: Wochenrohdaten kürzen, dann Pflanzen begrenzen
+  if (snapSize(json) > SNAP_MAX) { // zuerst Mini-Bilder weglassen (älteste zuerst) – der Foto-Hinweis bleibt
+    const withT = snap.plants.filter((p) => p.foto && p.foto.t).sort((a, b) => a.foto.d - b.foto.d);
+    while (snapSize(json) > SNAP_MAX && withT.length) { delete withT.shift().foto.t; json = JSON.stringify(snap); }
+  }
+  if (snapSize(json) > SNAP_MAX) { // sehr großer Garten: Wochenrohdaten kürzen, dann Pflanzen begrenzen
     const w0 = weekStart(today());
-    snap.plants.forEach((p) => { p.days = p.days.filter((d) => d >= w0); delete p.id; });
+    snap.plants.forEach((p) => { p.days = p.days.filter((d) => d >= w0); if (!p.foto) delete p.id; });
     json = JSON.stringify(snap);
-    while (json.length > SNAP_MAX && snap.plants.length) { snap.plants.pop(); json = JSON.stringify(snap); }
+    while (snapSize(json) > SNAP_MAX && snap.plants.length) { snap.plants.pop(); json = JSON.stringify(snap); }
   }
   return snap;
 }
@@ -2440,6 +2513,7 @@ function scheduleSync(soon) {
 }
 async function syncNow(force) {
   if (!sharing()) return false;
+  if (!fotosLoaded) { scheduleSync(); return false; } // erst die Fotos kennen, dann teilen
   if (syncBusy) { syncAgain = true; return false; }
   const nb = nbData();
   const snap = snapshotForUpload();
@@ -2453,6 +2527,7 @@ async function syncNow(force) {
     await backend.upsert(state.garden.id, nb.token, nb.name, snap);
     nb.sent = sig; nb.dirty = false;
     try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) { /* egal */ }
+    syncFotos(); // wartende Fotos (z. B. von offline) nachholen
     return true;
   } catch (e) {
     nb.dirty = true;
@@ -2501,7 +2576,7 @@ async function pollNow(always) {
       if (ent && ent.name !== name) ent.name = name;
     }
     saveCache();
-    if (changedView) { view = buildView(view.id); refresh(); }
+    if (changedView) { view = buildView(view.id); refresh(); markFotosSeen(); }
     else if (view) updateNeighborUI(); // „zuletzt aktiv“ weiterzählen
     renderNav();
     if (changedAny && overviewOpen && !nbConfirming) openNeighborhood(); // Übersicht auffrischen
@@ -2522,7 +2597,8 @@ function sanitizeSnap(s) {
     planted: Math.round(num(p.planted, day - 7)),
     resume: p.resume == null ? null : Math.round(num(p.resume, day)),
     days: (Array.isArray(p.days) ? p.days : []).slice(-14).filter((d) => typeof d === 'number' && isFinite(d)).map(Math.round),
-    paused: !!p.paused
+    paused: !!p.paused,
+    foto: sanitizeFoto(p.foto)
   }));
   return { level: clamp(Math.round(num(s.level, 0)), 0, LEVEL_MAX), day, plants };
 }
@@ -2533,7 +2609,7 @@ function buildView(id) {
   const plants = snap.plants.map((p) => ({
     id: p.id, species: p.species, goal: p.goal, growth: p.growth,
     lastWatered: p.last, plantedDay: p.planted, resumeDay: p.resume, days: p.days.slice(),
-    paused: p.paused ? snap.day : null, nb: true
+    paused: p.paused ? snap.day : null, nb: true, foto: p.foto || null
   }));
   return { id, name: (c && c.name) || (ent && ent.name) || 'Nachbargarten', level: snap.level, plants, at: c ? c.at : null, loaded: !!c };
 }
@@ -2567,6 +2643,7 @@ function showGarden(idx, dir) {
   for (const k of cans) if (!k.done) { k.done = true; pendingVis.delete(k.s.p.id); if (k.msg) toast(k.msg); if (k.res && k.res.levelUp) celebrate(k.res.levelUp); }
   cans.length = 0; drops.length = 0; sparks.length = 0; petals.length = 0; spray.length = 0;
   pendingVis.clear(); wiggle.clear();
+  hideNachweis();
   viewIdx = idx;
   view = ids[idx] ? buildView(ids[idx]) : null;
   document.body.classList.toggle('nachbar-ansicht', !!view);
@@ -2575,6 +2652,7 @@ function showGarden(idx, dir) {
   refresh();
   renderNav();
   if (dir) { canvas.classList.remove('rein-l', 'rein-r'); void canvas.offsetWidth; canvas.classList.add(dir > 0 ? 'rein-r' : 'rein-l'); }
+  markFotosSeen();
   if (view && Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll();
 }
 function titleNode() {
@@ -2704,7 +2782,7 @@ function openNeighborhood() {
     liste.append(ownRow);
     nb.list.forEach((ent, i) => {
       const v = buildView(ent.id), st = gardenStatus(v.plants, t);
-      const info = v.loaded ? `Stufe ${v.level} · ${st.text} ${st.emoji}${v.plants.some((p) => wateredToday(p, t)) ? ' · 💧' : ''}` : 'noch nicht geladen';
+      const info = v.loaded ? `Stufe ${v.level} · ${st.text} ${st.emoji}${v.plants.some((p) => wateredToday(p, t)) ? ' · 💧' : ''}${newFotos(ent, v.plants) ? ' · 📸' : ''}` : 'noch nicht geladen';
       const go = el('button', { class: 'nb-garten', type: 'button' }, miniPreview(v.plants, v.level),
         el('span', { class: 'nb-text' }, el('strong', null, v.name), el('span', null, info), el('span', { class: 'leise' }, v.at ? agoText(v.at) : '')));
       go.addEventListener('click', () => { closeSheet(); showGarden(i + 1, 1); });
@@ -2874,8 +2952,19 @@ async function fakeNeighbors(n = 3) {
         condition: 0, wateredToday: rc.water[i], week: 0, paused: !!(rc.pause && rc.pause.includes(i)),
         last, planted: t - 120, resume: null, days: days.reverse() };
     });
+    // 1.3: ein paar Fotos (heute, gestern, vor 3 Tagen) – Mini-Bild in den Schnappschuss, Vollbild ins Backend
+    const token = randomToken(), fotos = [];
+    for (let i = 0; i < Math.min(plants.length, 1 + (rc.level > 5 ? 1 : 0) + (rc.level > 10 ? 1 : 0)); i++) {
+      try {
+        const f = await makeFoto(await fakeBild(hashStr(id) + i * 977));
+        const d = t - [0, 1, 3][i];
+        plants[i].foto = f.thumb ? { d, t: f.thumb } : { d };
+        fotos.push([plants[i].id, d, f]);
+      } catch (e) { /* ohne Foto weiter */ }
+    }
     const snap = { v: 2, id, day: t, level: rc.level, xp: xpFor(rc.level), vitality: 1, deko: [], visible: [], plants };
-    await backend.upsert(id, randomToken(), rc.name, snap);
+    await backend.upsert(id, token, rc.name, snap);
+    for (const [pid, d, f] of fotos) { try { await backend.putFoto(id, token, pid, d, f.mime, f.data); } catch (e) { /* egal */ } }
     nb.list.push({ id, name: rc.name });
     added.push(rc.name);
   }
@@ -2896,10 +2985,10 @@ function setupNeighborhood() {
   ensureIdentity();
   loadCache();
   renderNav();
-  addEventListener('online', () => { if (nbData().dirty) scheduleSync(true); if (view || overviewOpen) pollNow(); });
+  addEventListener('online', () => { if (nbData().dirty) scheduleSync(true); else syncFotos(); if (view || overviewOpen) pollNow(); });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { clearTimeout(pollTimer); return; }
-    if (nbData().dirty) scheduleSync(true);
+    if (nbData().dirty) scheduleSync(true); else syncFotos();
     if (pollWanted()) { if (Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll(); }
   });
   scheduleSync();                    // beim Start (nur bei Änderung)
@@ -2916,6 +3005,494 @@ function houseIcon() {
   c.className = 'pixeltext';
   c.style.width = '39px'; c.style.height = '33px';
   return c;
+}
+
+/* ------------------------------------------------------------------ Foto-Nachweis (1.3)
+   Freiwillig: Beim Gießen (Knopf „📸 Nachweis?“) oder im Detail-Blatt ein kleines Foto machen.
+   Das Bild wird im Browser verkleinert (≤ 640 px, WebP/JPEG, Ziel ≤ 60 KB) und bekommt den Lofi-Look
+   des Gartens: warmer Farbstich, etwas Körnung, leichte Vignette. Dazu ein Mini-Bild (48 px, ≤ 2 KB).
+   Lokal: IndexedDB (nie localStorage), pro Pflanze nur das neueste Foto, nach 7 Tagen weg.
+   Geteilt (nur mit Gartennamen): Vollbild über die RPC upsert_photo, das Mini-Bild steckt im
+   Schnappschuss (begrenzt). Nachbarn laden das Vollbild erst beim Antippen (get_photo).
+   Fotos, die ohne Gartennamen gemacht wurden, bleiben immer nur auf dem Gerät. */
+const FOTO_TAGE = 7;                 // danach automatisch gelöscht (Server und Gerät)
+const FOTO_MAX = 640;                // lange Seite in Pixel
+const FOTO_ZIEL = 80000;             // base64-Zeichen ≈ 60 KB (Server erlaubt 90 000)
+const THUMB_PX = 48, THUMB_ZIEL = 2000;
+const THUMB_ANZAHL = 8, THUMB_BUDGET = 10000; // Mini-Bilder im Schnappschuss: neueste 8, zusammen ≤ 10 000 Zeichen
+const NB_FOTO_CACHE = 3;             // Nachbar-Vollbilder im Speicher
+const FOTO_MIMES = ['image/webp', 'image/jpeg'];
+const THUMB_RE = /^data:image\/(webp|jpeg);base64,[A-Za-z0-9+/]+=*$/;
+const B64_RE = /^[A-Za-z0-9+/]+=*$/;
+const FOTO_DB = 'gewohnheitsgarten-fotos' + (MOCK ? '.mock.' + MOCK_PROFILE : '');
+const MOCK_FOTOS = 'gewohnheitsgarten.mock-photos';
+
+let fotoIdx = new Map();   // Pflanzen-ID -> { plant, day, mime, thumb, size, synced, local } (ohne Vollbild)
+let fotosLoaded = false, fotoBusy = false, fotoTarget = null, fotoSyncBusy = false, fotoHintShown = false;
+let lastFotoInfo = null;
+const nbFotoCache = new Map(); // "garten:pflanze" -> data-URL, höchstens NB_FOTO_CACHE
+
+const fotoFresh = (d, t = today()) => typeof d === 'number' && isFinite(d) && t - d < FOTO_TAGE && d <= t + 1;
+const isoDay = (d) => new Date(d * 86400000).toISOString().slice(0, 10);
+const dayOfIso = (s) => Math.floor(Date.parse(s) / 86400000);
+function dayAgo(d, t = today()) {
+  const n = t - d;
+  return n <= 0 ? 'heute' : n === 1 ? 'gestern' : `vor ${n} Tagen`;
+}
+function dateText(d) { const x = new Date(d * 86400000); return `${x.getUTCDate()}.${x.getUTCMonth() + 1}.`; }
+
+/* ---------- IndexedDB: „meta“ (klein, beim Start geladen) und „bild“ (Vollbild, nur bei Bedarf) ---------- */
+let idbP = null;
+function idb() {
+  if (!idbP) idbP = new Promise((res, rej) => {
+    if (!window.indexedDB) { rej(new Error('kein IndexedDB')); return; }
+    const r = indexedDB.open(FOTO_DB, 1);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'plant' });
+      if (!db.objectStoreNames.contains('bild')) db.createObjectStore('bild', { keyPath: 'plant' });
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  return idbP;
+}
+async function idbRun(stores, mode, fn) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(stores, mode);
+    let out;
+    const r = fn(tx);
+    if (r) r.onsuccess = () => { out = r.result; };
+    tx.oncomplete = () => res(out);
+    tx.onerror = tx.onabort = () => rej(tx.error || new Error('IndexedDB'));
+  });
+}
+const fotoMetaAll = () => idbRun(['meta'], 'readonly', (tx) => tx.objectStore('meta').getAll());
+const fotoBild = (pid) => idbRun(['bild'], 'readonly', (tx) => tx.objectStore('bild').get(pid));
+const fotoPutMeta = (m) => idbRun(['meta'], 'readwrite', (tx) => { tx.objectStore('meta').put(m); });
+const fotoPut = (m, data) => idbRun(['meta', 'bild'], 'readwrite', (tx) => {
+  tx.objectStore('meta').put(m); tx.objectStore('bild').put({ plant: m.plant, data });
+});
+const fotoDelLocal = (pid) => idbRun(['meta', 'bild'], 'readwrite', (tx) => {
+  tx.objectStore('meta').delete(pid); tx.objectStore('bild').delete(pid);
+});
+
+async function loadFotos() {
+  try {
+    const all = await fotoMetaAll();
+    fotoIdx = new Map((all || []).filter((m) => m && m.plant).map((m) => [m.plant, m]));
+  } catch (e) { fotoIdx = new Map(); }
+  fotosLoaded = true;
+  await purgeFotos();
+}
+/** Abgelaufene oder verwaiste Fotos vom Gerät löschen (und – falls schon geteilt – auf dem Server). */
+let purging = false;
+async function purgeFotos() {
+  if (purging) return;
+  purging = true;
+  try {
+    const t = today(), ids = new Set(state.garden.plants.map((p) => p.id));
+    for (const [pid, m] of [...fotoIdx]) {
+      const orphan = !ids.has(pid);
+      if (fotoFresh(m.day, t) && !orphan) continue;
+      fotoIdx.delete(pid);
+      try { await fotoDelLocal(pid); } catch (e) { /* egal */ }
+      if (orphan && m.synced) queueFotoDelete(pid); // abgelaufene löscht der Server selbst
+    }
+  } finally { purging = false; }
+}
+function queueFotoDelete(pid) {
+  const nb = nbData();
+  nb.fotoDel = (Array.isArray(nb.fotoDel) ? nb.fotoDel : []).filter((x) => x !== pid).concat(pid).slice(-60);
+}
+
+/** Foto einer Pflanze (eigene: aus fotoIdx, Nachbar: aus dem Schnappschuss) – nur wenn jünger als 7 Tage. */
+function fotoOf(p) {
+  if (p.nb) return p.foto && fotoFresh(p.foto.d) ? p.foto : null;
+  const m = fotosLoaded && fotoIdx.get(p.id);
+  return m && fotoFresh(m.day) ? { d: m.day, t: m.thumb } : null;
+}
+
+/* ---------- Bild verkleinern + Lofi-Look ---------- */
+let webpOk = null;
+function encodeCv(cv, q) {
+  if (webpOk !== false) {
+    const u = cv.toDataURL('image/webp', q);
+    if (u.startsWith('data:image/webp')) { webpOk = true; return { mime: 'image/webp', url: u }; }
+    webpOk = false; // Safari kann (je nach Version) kein WebP schreiben: dann JPEG
+  }
+  return { mime: 'image/jpeg', url: cv.toDataURL('image/jpeg', q) };
+}
+const b64Of = (url) => url.slice(url.indexOf(',') + 1);
+
+/** Warmer Farbstich, angehobene Schatten (wie die Garten-Palette), leichte Körnung und Vignette – in einem Durchgang. */
+function lofi(c, w, h) {
+  const img = c.getImageData(0, 0, w, h), D = img.data;
+  const cx = (w - 1) / 2, cy = (h - 1) / 2, inv = 1 / (cx * cx + cy * cy);
+  const R = mulberry32((w * 7919 + h) ^ 0x51ed);
+  let gRow = new Float32Array(Math.ceil(w / 2) + 1);
+  for (let y = 0; y < h; y++) {
+    if ((y & 1) === 0) for (let i = 0; i < gRow.length; i++) gRow[i] = (R() - 0.5) * 16; // Körnung in 2×2-Blöcken
+    const dy = (y - cy) * (y - cy);
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      let r = D[o], g = D[o + 1], b = D[o + 2];
+      // sanfter Kontrast + warm, Schwarz leicht violett angehoben
+      r = r * 0.9 + 26; g = g * 0.86 + 18; b = b * 0.76 + 26;
+      const lum = (r + g + b) / 3;
+      r += (lum - r) * 0.1; g += (lum - g) * 0.1; b += (lum - b) * 0.1; // ein Hauch entsättigt
+      const d = ((x - cx) * (x - cx) + dy) * inv;
+      const v = 1 - 0.38 * d * d;
+      const n = gRow[x >> 1];
+      D[o] = r * v + n; D[o + 1] = g * v + n; D[o + 2] = b * v * 0.98 + n;
+    }
+  }
+  c.putImageData(img, 0, 0);
+}
+
+/** Datei/Blob -> { mime, data (base64), thumb (data-URL) }. Kein Bild bleibt im Speicher hängen. */
+async function makeFoto(blob) {
+  const src = URL.createObjectURL(blob);
+  let img = new Image(), cv = null, tc = null;
+  try {
+    img.decoding = 'async';
+    img.src = src;
+    await img.decode();
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    if (!iw || !ih) throw new Error('leeres Bild');
+    let k = Math.min(1, FOTO_MAX / Math.max(iw, ih));
+    let w = Math.max(1, Math.round(iw * k)), h = Math.max(1, Math.round(ih * k));
+    cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    let c = cv.getContext('2d');
+    c.imageSmoothingQuality = 'high';
+    c.drawImage(img, 0, 0, w, h);
+    img.removeAttribute('src'); img = null; URL.revokeObjectURL(src);
+    lofi(c, w, h);
+    // Qualität senken, bis das Ziel passt; notfalls kleiner rechnen
+    let q = 0.6, out = encodeCv(cv, q);
+    while (b64Of(out.url).length > FOTO_ZIEL) {
+      if (q > 0.3) { q = Math.round((q - 0.1) * 100) / 100; }
+      else {
+        const nw = Math.round(w * 0.8), nh = Math.round(h * 0.8);
+        if (nw < 160) break;
+        const c2 = document.createElement('canvas'); c2.width = nw; c2.height = nh;
+        const x2 = c2.getContext('2d'); x2.imageSmoothingQuality = 'high'; x2.drawImage(cv, 0, 0, nw, nh);
+        cv.width = cv.height = 0; cv = c2; c = x2; w = nw; h = nh; q = 0.5;
+      }
+      out = encodeCv(cv, q);
+    }
+    const data = b64Of(out.url);
+    if (data.length > 89000) throw new Error('zu groß');
+    // Mini-Bild: quadratischer Ausschnitt aus der Mitte
+    tc = document.createElement('canvas'); tc.width = tc.height = THUMB_PX;
+    const tx2 = tc.getContext('2d'); tx2.imageSmoothingQuality = 'high';
+    const s = Math.min(w, h);
+    tx2.drawImage(cv, (w - s) / 2, (h - s) / 2, s, s, 0, 0, THUMB_PX, THUMB_PX);
+    let tq = 0.5, th = encodeCv(tc, tq).url;
+    while (th.length > THUMB_ZIEL && tq > 0.15) { tq -= 0.1; th = encodeCv(tc, tq).url; }
+    if (th.length > THUMB_ZIEL || !THUMB_RE.test(th)) th = '';
+    lastFotoInfo = { mime: out.mime, w, h, q, bytes: Math.floor(data.length * 3 / 4), b64: data.length, thumbChars: th.length, thumbBytes: th ? Math.floor(b64Of(th).length * 3 / 4) : 0 };
+    return { mime: out.mime, data, thumb: th };
+  } finally {
+    if (img) { img.removeAttribute('src'); URL.revokeObjectURL(src); }
+    if (cv) cv.width = cv.height = 0;
+    if (tc) tc.width = tc.height = 0;
+  }
+}
+
+/* ---------- Foto aufnehmen ---------- */
+const fotoInput = el('input', { type: 'file', accept: 'image/*', capture: 'environment', id: 'foto-input', hidden: '', 'aria-hidden': 'true', tabindex: '-1' });
+let lastTake = Promise.resolve(null);
+fotoInput.addEventListener('change', () => {
+  const f = fotoInput.files && fotoInput.files[0], pid = fotoTarget;
+  fotoInput.value = '';
+  if (f && pid) lastTake = takeFoto(f, pid);
+});
+
+/** Kamera (oder Galerie) öffnen – beim allerersten geteilten Foto vorher kurz der Datenschutz-Hinweis. */
+function fotoStart(p, gallery) {
+  if (fotoBusy || view) return;
+  const go = () => {
+    fotoTarget = p.id;
+    if (gallery) fotoInput.removeAttribute('capture'); else fotoInput.setAttribute('capture', 'environment');
+    fotoInput.value = '';
+    fotoInput.click();
+  };
+  if (sharing() && !state.privat.fotoHinweis) {
+    openSheet((b) => {
+      b.setAttribute('aria-label', 'Foto-Nachweis');
+      const ok = el('button', { class: 'knopf haupt', type: 'button' }, 'Verstanden');
+      const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Lieber nicht');
+      ok.addEventListener('click', () => {
+        if (ok.dataset.done) return; ok.dataset.done = '1';
+        state.privat.fotoHinweis = true;
+        saveState();
+        closeSheet();
+        go(); // noch im selben Tipp, sonst blockiert der Browser die Kamera
+      });
+      ab.addEventListener('click', closeSheet);
+      b.append(el('div', { class: 'blatt-kopf' }, pixelText('Foto', 3)),
+        el('p', { class: 'stimmung gross' }, '📸'),
+        el('p', { class: 'stimmung' }, 'Deine Nachbarn sehen dieses Foto. Es wird nach 7 Tagen automatisch gelöscht.'),
+        el('div', { class: 'reihe' }, ab, ok));
+    });
+    return;
+  }
+  go();
+}
+
+async function takeFoto(file, pid) {
+  if (fotoBusy) return null;
+  const p = state.garden.plants.find((x) => x.id === pid);
+  if (!p) return null;
+  fotoBusy = true;
+  hideNachweis();
+  toast('Foto wird entwickelt …');
+  try {
+    const f = await makeFoto(file);
+    const meta = { plant: pid, day: today(), mime: f.mime, thumb: f.thumb, size: f.data.length, synced: false, local: !sharing() };
+    await fotoPut(meta, f.data);
+    fotoIdx.set(pid, meta);
+    const nb = nbData();
+    if (Array.isArray(nb.fotoDel)) nb.fotoDel = nb.fotoDel.filter((x) => x !== pid);
+    renderLabels();
+    if (sharing()) syncFotos();
+    toast(meta.local ? 'Foto gespeichert. Es bleibt auf deinem Gerät.' : 'Foto hängt jetzt an der Pflanze.');
+    openFoto(p);
+    return lastFotoInfo;
+  } catch (e) {
+    toast('Das Foto hat leider nicht geklappt.');
+    return null;
+  } finally { fotoBusy = false; }
+}
+
+async function deleteFoto(p) {
+  const m = fotoIdx.get(p.id);
+  fotoIdx.delete(p.id);
+  try { await fotoDelLocal(p.id); } catch (e) { /* egal */ }
+  if (m && m.synced) { queueFotoDelete(p.id); saveState(); syncFotos(); }
+  renderLabels();
+}
+
+/* ---------- Hochladen (offline: bleibt lokal und wird später nachgeholt) ---------- */
+async function syncFotos() {
+  if (!fotosLoaded || !sharing() || fotoSyncBusy || navigator.onLine === false) return;
+  const nb = nbData();
+  if (!nb.sent) { scheduleSync(true); return; } // der Garten muss zuerst auf dem Server stehen
+  fotoSyncBusy = true;
+  let changed = false;
+  try {
+    for (const pid of (Array.isArray(nb.fotoDel) ? nb.fotoDel.slice() : [])) {
+      await backend.delFoto(state.garden.id, nb.token, pid);
+      nb.fotoDel = nb.fotoDel.filter((x) => x !== pid);
+      changed = true;
+    }
+    for (const [pid, m] of [...fotoIdx]) {
+      if (m.synced || m.local || !fotoFresh(m.day) || !state.garden.plants.some((x) => x.id === pid)) continue;
+      const rec = await fotoBild(pid);
+      if (!rec || !rec.data) continue;
+      await backend.putFoto(state.garden.id, nb.token, pid, m.day, m.mime, rec.data);
+      if (fotoIdx.get(pid) !== m) continue; // inzwischen ersetzt: nächste Runde
+      m.synced = true;
+      await fotoPutMeta(m);
+      changed = true;
+    }
+  } catch (e) {
+    if (!fotoHintShown && navigator.onLine !== false && e.status) { fotoHintShown = true; toastLater('Dein Foto bleibt erstmal auf dem Gerät und wird später geteilt.'); }
+  } finally {
+    fotoSyncBusy = false;
+    if (changed) saveState(); // Schnappschuss mit neuen Mini-Bildern teilen
+  }
+}
+
+/** Für den Schnappschuss: nur geteilte, frische Fotos; Mini-Bilder nur für die neuesten (Budget). */
+function fotoSnapshotMap(t) {
+  const out = new Map();
+  if (!fotosLoaded) return out;
+  const ids = new Set(state.garden.plants.map((p) => p.id));
+  const list = [...fotoIdx.values()].filter((m) => m.synced && !m.local && ids.has(m.plant) && fotoFresh(m.day, t))
+    .sort((a, b) => b.day - a.day);
+  let budget = THUMB_BUDGET, n = 0;
+  for (const m of list) {
+    const f = { d: m.day };
+    if (m.thumb && n < THUMB_ANZAHL && m.thumb.length <= budget) { f.t = m.thumb; budget -= m.thumb.length; n++; }
+    out.set(m.plant, f);
+  }
+  return out;
+}
+function sanitizeFoto(f) {
+  if (!f || typeof f !== 'object' || typeof f.d !== 'number' || !isFinite(f.d)) return null;
+  const o = { d: Math.round(f.d) };
+  if (typeof f.t === 'string' && f.t.length <= 3000 && THUMB_RE.test(f.t)) o.t = f.t;
+  return o;
+}
+
+/* ---------- Nachbar-Fotos: nur beim Antippen laden, wenige im Speicher ---------- */
+async function nbFoto(gid, pid) {
+  const key = gid + ':' + pid;
+  if (nbFotoCache.has(key)) { const v = nbFotoCache.get(key); nbFotoCache.delete(key); nbFotoCache.set(key, v); return v; }
+  const r = await backend.getFoto(gid, pid);
+  if (!r || !FOTO_MIMES.includes(r.mime) || typeof r.data !== 'string' || r.data.length > 90000 || !B64_RE.test(r.data)) return null;
+  const v = { url: `data:${r.mime};base64,${r.data}`, d: r.day };
+  nbFotoCache.set(key, v);
+  while (nbFotoCache.size > NB_FOTO_CACHE) nbFotoCache.delete(nbFotoCache.keys().next().value);
+  return v;
+}
+function fotoKeys(plants) { return plants.filter((p) => fotoOf(p)).map((p) => p.id + ':' + p.foto.d + ':' + (p.foto.t ? hashStr(p.foto.t).toString(36) : '')); }
+function newFotos(ent, plants) { const seen = new Set(ent.seen || []); return fotoKeys(plants).some((k) => !seen.has(k)); }
+function markFotosSeen() {
+  if (!view || !view.loaded) return;
+  const ent = nbData().list.find((x) => x.id === view.id);
+  if (!ent) return;
+  const keys = fotoKeys(view.plants);
+  if (keys.join() === (ent.seen || []).join()) return;
+  ent.seen = keys.slice(0, 60);
+  try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) { /* egal */ }
+}
+
+/* ---------- Polaroid groß ---------- */
+function openFoto(p) {
+  const f = fotoOf(p);
+  if (!f) { toast('Dieses Foto ist schon verblüht.'); return; }
+  const own = !p.nb, gid = view ? view.id : null;
+  let tok = 0, img = null, wrap = null;
+  openSheet((b) => {
+    b.setAttribute('aria-label', `Foto: ${SPECIES[p.species].name}, ${dayAgo(f.d)}`);
+    b.classList.add('foto-blatt');
+    img = el('img', { class: 'polaroid-bild', alt: `Foto bei der Pflanze ${SPECIES[p.species].name}` });
+    if (f.t) { img.src = f.t; img.classList.add('unscharf'); }
+    wrap = el('div', { class: 'polaroid-rahmen lädt' }, img);
+    const fig = el('figure', { class: 'polaroid' }, wrap, el('figcaption', null, pixelText(dateText(f.d), 3, true)));
+    fig.style.setProperty('--dreh', (((hashStr(p.id + ':' + f.d) % 9) - 4) * 0.6).toFixed(1) + 'deg');
+    const cap = el('p', { class: 'polaroid-text' }, `${SPECIES[p.species].name} · ${dayAgo(f.d)}`);
+    const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Schließen');
+    zu.addEventListener('click', closeSheet);
+    const area = el('div', { class: 'reihe' });
+    if (own) {
+      const showDel = () => {
+        const del = el('button', { class: 'knopf', type: 'button' }, 'Foto löschen');
+        del.addEventListener('click', () => {
+          const yes = el('button', { class: 'knopf gefahr', type: 'button' }, 'Ja, löschen');
+          const no = el('button', { class: 'knopf leise', type: 'button' }, 'Behalten');
+          yes.addEventListener('click', () => {
+            if (yes.dataset.done) return; yes.dataset.done = '1';
+            deleteFoto(p); closeSheet(); toast('Foto gelöscht.');
+          });
+          no.addEventListener('click', showDel);
+          area.replaceChildren(el('p', { class: 'frage' }, 'Dieses Foto löschen?'), no, yes);
+        });
+        area.replaceChildren(zu, del);
+      };
+      showDel();
+    } else area.append(zu);
+    b.append(fig, cap, area);
+  });
+  tok = sheetToken;
+  const show = (url) => {
+    if (tok !== sheetToken || !img) return;
+    img.onload = () => { img.classList.remove('unscharf'); wrap.classList.remove('lädt'); };
+    img.src = url;
+  };
+  const fail = (msg) => { if (tok !== sheetToken || !wrap) return; wrap.classList.remove('lädt'); wrap.classList.add('fehlt'); wrap.dataset.text = msg; };
+  if (own) {
+    fotoBild(p.id).then((rec) => {
+      const m = fotoIdx.get(p.id);
+      if (rec && rec.data && m) show(`data:${m.mime};base64,${rec.data}`); else fail('Foto nicht gefunden');
+    }).catch(() => fail('Foto nicht gefunden'));
+  } else {
+    nbFoto(gid, p.id).then((v) => { if (v) show(v.url); else fail('Schon verblüht'); }).catch(() => fail('Gerade offline'));
+  }
+}
+
+/* ---------- Kleines Polaroid an der Pflanze ---------- */
+function fotoPin(s, f) {
+  const p = s.p;
+  const b = el('button', { class: 'foto-pin', type: 'button', 'aria-label': `Foto ansehen: ${SPECIES[p.species].name}, ${dayAgo(f.d)}` });
+  if (f.t) b.append(el('img', { src: f.t, alt: '', width: '20', height: '20' }));
+  else b.classList.add('ohne-bild');
+  if (f.d < today()) b.classList.add('aelter');
+  b.style.left = (s.cx + 11) * PX + 'px';
+  b.style.top = (s.base - 9) * PX + 'px';
+  b.style.setProperty('--dreh', ((hashStr(p.id) % 2 ? 1 : -1) * (5 + hashStr(p.id) % 5)) + 'deg');
+  b.addEventListener('click', (e) => { e.stopPropagation(); openFoto(p); });
+  return b;
+}
+
+/* ---------- „📸 Nachweis?“ nach dem Gießen – dezent, verschwindet von selbst ---------- */
+const nachweis = el('button', { id: 'nachweis', type: 'button', hidden: '' }, '📸 Nachweis?');
+let nachweisTimer = 0, nachweisPlant = null;
+nachweis.addEventListener('click', () => {
+  const p = nachweisPlant;
+  hideNachweis();
+  if (p && state.garden.plants.includes(p)) fotoStart(p, false);
+});
+function showNachweis(p) {
+  if (view || !blatt.hidden || fotoBusy) return;
+  const f = fotoOf(p);
+  if (f && f.d === today()) return; // heute schon ein Foto
+  const s = slots.find((x) => x.p.id === p.id);
+  if (!s) return;
+  nachweisPlant = p;
+  nachweis.style.left = s.cx * PX + 'px';
+  nachweis.style.top = ((s.base + 10) * PX + 34) + 'px';
+  nachweis.hidden = false;
+  nachweis.classList.remove('weg'); void nachweis.offsetWidth; nachweis.classList.add('da');
+  clearTimeout(nachweisTimer);
+  nachweisTimer = setTimeout(hideNachweis, 6000);
+}
+function hideNachweis() {
+  clearTimeout(nachweisTimer);
+  if (nachweis.hidden) return;
+  nachweis.classList.remove('da'); nachweis.classList.add('weg');
+  nachweisTimer = setTimeout(() => { nachweis.hidden = true; nachweisPlant = null; }, 300);
+}
+
+/* ---------- Testhilfe: buntes Bild ohne Kamera ---------- */
+function fakeBild(seed) {
+  const R = mulberry32(seed >>> 0);
+  const w = 1200, h = 900, cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const c = cv.getContext('2d');
+  const hue = Math.floor(R() * 360);
+  const g = c.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, `hsl(${hue},60%,72%)`); g.addColorStop(1, `hsl(${(hue + 80) % 360},45%,38%)`);
+  c.fillStyle = g; c.fillRect(0, 0, w, h);
+  for (let i = 0; i < 26; i++) {
+    c.fillStyle = `hsla(${Math.floor(R() * 360)},${50 + R() * 40}%,${40 + R() * 40}%,${0.5 + R() * 0.5})`;
+    c.beginPath();
+    if (R() < 0.5) c.arc(R() * w, R() * h, 20 + R() * 140, 0, Math.PI * 2);
+    else c.rect(R() * w, R() * h, 40 + R() * 260, 30 + R() * 200);
+    c.fill();
+  }
+  c.fillStyle = '#fff6e8'; c.font = 'bold 90px system-ui, sans-serif'; c.fillText('Test ' + ((seed >>> 0) % 100), 60, h - 80);
+  return new Promise((res) => cv.toBlob((b) => { cv.width = cv.height = 0; res(b); }, 'image/jpeg', 0.92));
+}
+/** garten._fakeFoto(pflanzenId?) – füttert das Datei-Feld wie die Kamera. */
+async function fakeFoto(pid) {
+  const plants = state.garden.plants;
+  if (!plants.length) return 'Erst eine Pflanze setzen.';
+  const p = plants.find((x) => x.id === pid) || plants.find((x) => { const f = fotoOf(x); return !f || f.d !== today(); }) || plants[0];
+  const blob = await fakeBild(Date.now() ^ hashStr(p.id));
+  const file = new File([blob], 'test.jpg', { type: 'image/jpeg' });
+  fotoTarget = p.id;
+  try {
+    const dt = new DataTransfer(); dt.items.add(file);
+    fotoInput.files = dt.files;
+    fotoInput.dispatchEvent(new Event('change'));
+  } catch (e) { lastTake = takeFoto(file, p.id); }
+  return lastTake;
+}
+
+/* ---------- Mock-Backend für Fotos (localStorage, nur Test) ---------- */
+function mockFotos() { try { return JSON.parse(localStorage.getItem(MOCK_FOTOS)) || {}; } catch (e) { return {}; } }
+function mockFotosSave(db) {
+  try { localStorage.setItem(MOCK_FOTOS, JSON.stringify(db)); }
+  catch (e) { const er = new Error('voll'); er.status = 507; throw er; }
+}
+function mockCheckToken(gid, token) {
+  const row = mockRead()[gid], h = 'h' + hashStr(token) + '.' + hashStr(token + 'x');
+  if (!row || row.token_hash !== h) { const e = new Error('forbidden'); e.status = 403; throw e; }
 }
 
 /* ------------------------------------------------------------------ Start */
@@ -2944,7 +3521,10 @@ function init() {
   makeGrain();
   refresh();
   start();
+  $('szene').append(nachweis);
+  document.body.append(fotoInput);
   setupNeighborhood();
+  loadFotos().then(() => { renderLabels(); if (sharing()) syncFotos(); });
 
   let lastDay = today(), lastMin = -1;
   setInterval(() => {
@@ -2985,7 +3565,11 @@ window.garten = {
   // Nachbarschaft (Test/Debug)
   _fakeNachbar: fakeNeighbors, _poll: () => pollNow(true), _sync: () => syncNow(true),
   _upload: snapshotForUpload, _nb: () => ({ on: NB_ON, mock: MOCK, profile: MOCK_PROFILE, id: state.garden.id, name: nbData().name, list: nbData().list.slice(), view: view && view.id, idx: viewIdx }),
-  _show: (i) => showGarden(i), _invite: inviteLink, _removeNachbar: removeNeighbor
+  _show: (i) => showGarden(i), _invite: inviteLink, _removeNachbar: removeNeighbor,
+  // Fotos (1.3)
+  _fakeFoto: fakeFoto, _fotoInfo: () => lastFotoInfo, _syncFotos: () => syncFotos(),
+  _fotos: () => [...fotoIdx.values()].map((m) => ({ plant: m.plant, day: m.day, mime: m.mime, size: m.size, thumb: m.thumb.length, synced: m.synced, local: m.local })),
+  _openFoto: (id) => { const p = vPlants().find((x) => x.id === id); if (p) openFoto(p); }
 };
 init();
 })();
