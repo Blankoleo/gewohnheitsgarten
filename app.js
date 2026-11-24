@@ -390,15 +390,17 @@ const DRAW = {
       disc(b, CX + 3, BY - 8 + d * 3, 1.1, 1.1, G);
       return;
     }
-    const cfg = st === 2 ? { n: 4, len: 14, spread: 0.75 } : st === 3 ? { n: 6, len: 20, spread: 0.9 } : { n: 8 + ex, len: 27 + ex * 1.5, spread: 1.0 + ex * 0.13 };
+    const cfg = st === 2 ? { n: 4, len: 14, spread: 0.75 } : st === 3 ? { n: 6, len: 20, spread: 0.9 } : { n: 8 - (ex ? 1 : 0), len: 27 + ex * 4, spread: 1.0 + ex * 0.16 };
     const angs = [];
     for (let i = 0; i < cfg.n; i++) angs.push(-Math.PI / 2 + (i / (cfg.n - 1) - 0.5) * 2 * cfg.spread);
     angs.sort((a1, a2) => Math.abs(a2 + Math.PI / 2) - Math.abs(a1 + Math.PI / 2));
     angs.forEach((a, i) => {
       const k = Math.abs(a + Math.PI / 2) / cfg.spread;
-      const len = cfg.len * (1 - 0.3 * k);
+      // ab Prächtig: äußere Wedel länger und bogig überhängend, Längen unregelmäßig
+      const len = cfg.len * (ex ? (0.82 + 0.25 * k) * (0.9 + 0.2 * ((i * 7) % 5) / 4) : (1 - 0.3 * k));
       const shade = i / angs.length;
-      frond(b, CX + (a + Math.PI / 2) * 1.6, BY, a, len, d, mix(D, G, 0.35 + shade * 0.65), D, mix(G, Li, shade));
+      const arch = ex ? Math.min(0.95, d + k * (0.3 + ex * 0.13)) : d;
+      frond(b, CX + (a + Math.PI / 2) * 1.6, BY, a, len, arch, mix(D, G, 0.35 + shade * 0.65), D, mix(G, Li, shade), ex ? 1.45 : 1);
     });
     if (st >= 3 && d < 0.4) {
       b.part(); curve(b, [CX + 1, BY, CX + 2, BY - 9, CX, BY - 13], 1.3, 1, Li);
@@ -406,8 +408,8 @@ const DRAW = {
     }
     if (ex >= 2) { // eingerollte junge Wedel (Fiddleheads)
       for (const sd of [-1, 1]) {
-        b.part(); curve(b, [CX + sd * 2, BY, CX + sd * 5, BY - 14, CX + sd * 3, BY - 27 + d * 10], 1.3, 1, Li);
-        disc(b, CX + sd * 3.5, BY - 28 + d * 10, 1.7, 1.7, G); b.put(CX + sd * 3.5, BY - 28 + d * 10, Li); b.put(CX + sd * 4, BY - 27 + d * 10, D);
+        b.part(); curve(b, [CX + sd * 3, BY, CX + sd * 7, BY - 9, CX + sd * 5, BY - 17 + d * 7], 1.2, 1, Li);
+        disc(b, CX + sd * 5.5, BY - 18 + d * 7, 1.6, 1.6, G); b.put(CX + sd * 5.5, BY - 18 + d * 7, Li); b.put(CX + sd * 6, BY - 17 + d * 7, D);
       }
     }
     if (ex >= 1 && w < 0.6) sprinkle(b, 6 + ex * 6, [[246, 240, 214], [214, 236, 170]], 11 + ex, false);
@@ -645,7 +647,8 @@ function sprinkle(b, n, cols, seed, plus) {
   }
 }
 
-function frond(b, x0, y0, ang, len, droop, col, dark, light) {
+function frond(b, x0, y0, ang, len, droop, col, dark, light, airy) {
+  airy = airy || 1; // >1: weiter auseinander stehende, kürzere Fiedern (luftiger)
   // Wedel: steigt auf, biegt sich nach außen; beim Hängen kippt die Spitze nach unten
   const sgn = Math.sign(Math.cos(ang)) || (ang > -Math.PI / 2 ? 1 : -1);
   const out = ang + sgn * (0.75 + droop * 1.3);
@@ -653,12 +656,12 @@ function frond(b, x0, y0, ang, len, droop, col, dark, light) {
   const x1 = cx + Math.cos(out) * len * 0.5, y1 = cy + Math.sin(out) * len * 0.5 + droop * len * 0.2;
   const a = [x0, y0, cx, cy, x1, y1];
   b.part();
-  const n = Math.max(4, Math.floor(len / 1.7));
+  const n = Math.max(4, Math.floor(len / (1.7 * airy)));
   for (let i = 1; i < n; i++) {
     const t = i / n;
     const p = qp(a, t), q = qp(a, Math.min(1, t + 0.03));
     const dir = Math.atan2(q[1] - p[1], q[0] - p[0]);
-    const l = Math.pow(1 - t, 0.6) * len * 0.2 + 0.8;
+    const l = (Math.pow(1 - t, 0.6) * len * 0.2 + 0.8) / Math.sqrt(airy);
     for (const s of [-1, 1]) {
       const la = dir + s * (0.95 - droop * 0.25) + droop * 0.7 * (Math.sign(Math.cos(dir)) || 1);
       seg(b, p[0], p[1], p[0] + Math.cos(la) * l, p[1] + Math.sin(la) * l, 1, s > 0 ? col : light);
@@ -668,9 +671,12 @@ function frond(b, x0, y0, ang, len, droop, col, dark, light) {
 }
 
 const STAGE_K = [1, 1, 1, 1, 1, 1.22, 1.44, 1.68]; // Vergrößerung der Extra-Stufen
+const SPAD_X = 14, SPAD_Y = 12;                     // Sprite-Rand im gedachten Raum
 function buildBuf(sp, st, cond) {
   const K = STAGE_K[st];
-  const b = K === 1 ? new Buf() : new Buf(Math.round(SW * K / 2) * 2, Math.round(SH * K) + 2);
+  // Rand um den gedachten 40x50-Raum: Wedel, Extra-Blätter und Kronen dürfen darüber hinausragen,
+  // sonst entstehen harte, gerade Schnittkanten. Leere Ränder kosten beim Zeichnen nichts (topRow).
+  const b = st === 0 ? new Buf() : new Buf(Math.round((SW + 2 * SPAD_X) * K / 2) * 2, Math.round((SH + SPAD_Y) * K) + 2);
   tK = K; tOX = b.w / 2; tOY = b.h - 1;
   const d = [0, 0.5, 0.95][cond], w = [0, 0.2, 0.85][cond];
   if (st === 0) drawSeed(b, sp);
@@ -837,7 +843,8 @@ let slots = [], beds = [];
 let lowerTop = 0, lowerH = 0;               // unterer Garten (Weg, Teich, Brunnen) – wächst mit der Stufe
 let GS = { level: 0, eff: 0, vit: 1 };       // Garten-Zustand für das Zeichnen
 let pal = paletteAt(currentHour());
-const spriteH = (st) => STAGE_K[st] === 1 ? SH : Math.round(SH * STAGE_K[st]) + 2;
+/** Tatsächliche Höhe des Pflanzenbilds (ohne leeren Rand oben). */
+function contentH(p) { const spr = getSprite(p.species, stageOf(p.growth), 0, false); return spr.height - spr.topRow; }
 
 const GRASS_TOP = [134, 170, 128], GRASS_BOT = [82, 122, 112];
 const SOIL = [100, 70, 60], SOIL_TOP = [128, 92, 74], SOIL_WET = [70, 48, 46];
@@ -871,7 +878,7 @@ function layout() {
     const x0 = Math.round((W - items * slotW) / 2);
     if (r > 0) { // große Pflanzen brauchen mehr Platz nach oben
       let mh = SH;
-      for (let i = 0; i < items; i++) mh = Math.max(mh, spriteH(stageOf(plants[r * cols + i].growth)));
+      for (let i = 0; i < items; i++) mh = Math.max(mh, contentH(plants[r * cols + i]) + 4);
       base += RH + Math.max(0, mh - SH - 4);
     }
     beds.push({ x0: x0 - 4, x1: x0 + items * slotW + 4, base });
@@ -2185,7 +2192,7 @@ function addPlant(name, sp, goal) {
   toast(`${name} ist eingepflanzt. Gieß sie gleich zum ersten Mal.`);
   const s = slots.find((x) => x.p.id === p.id);
   if (s) {
-    const y = (s.base - spriteH(stageOf(p.growth))) * PX;
+    const y = (s.base - contentH(p)) * PX;
     if (y + 200 > window.scrollY + innerHeight) window.scrollTo({ top: Math.max(0, y - 120), behavior: 'smooth' });
   }
 }
@@ -2211,7 +2218,7 @@ function plantAt(e) {
   let best = null, bd = 1e9;
   for (const s of slots) {
     const spr = getSprite(s.p.species, visualOf(s.p).stage, visualOf(s.p).cond, s.flip);
-    const topY = s.base - spr.height + 1 + spr.topRow - 3, hw = Math.max(17, spr.width * 0.4);
+    const topY = s.base - spr.height + 1 + spr.topRow - 3, hw = Math.max(17, spr.width * 0.3);
     if (x < s.cx - hw || x > s.cx + hw || y < Math.min(topY, s.base - 14) || y > s.base + 8) continue;
     const d = Math.abs(x - s.cx);
     if (d < bd) { bd = d; best = s; }
