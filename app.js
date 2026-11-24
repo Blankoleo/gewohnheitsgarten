@@ -1211,6 +1211,7 @@ function openSheet(build) {
   const tok = ++sheetToken;
   blatt.replaceChildren();
   build(blatt);
+  blatt.inert = false;
   blatt.hidden = false; schleier.hidden = false;
   requestAnimationFrame(() => requestAnimationFrame(() => {
     if (tok !== sheetToken) return;
@@ -1219,6 +1220,7 @@ function openSheet(build) {
 }
 function closeSheet() {
   const tok = ++sheetToken;
+  blatt.inert = true; // beim Zuklappen nicht mehr antippbar (sonst Doppel-Pflanzen)
   blatt.classList.remove('offen'); schleier.classList.remove('offen');
   setTimeout(() => {
     if (tok !== sheetToken) return;
@@ -1246,13 +1248,16 @@ function openNew() {
     }
     const ok = el('button', { class: 'knopf haupt', type: 'button' }, 'Einpflanzen');
     const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Abbrechen');
+    let gepflanzt = false;
     ok.addEventListener('click', () => {
+      if (gepflanzt) return; // Doppeltipp: nur einmal einpflanzen
       const name = inp.value.trim();
       if (!name) {
         inp.classList.remove('wackel'); void inp.offsetWidth; inp.classList.add('wackel');
         inp.focus();
         return;
       }
+      gepflanzt = true;
       addPlant(name, chosen);
       closeSheet();
     });
