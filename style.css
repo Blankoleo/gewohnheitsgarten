@@ -1,0 +1,350 @@
+:root {
+  --creme: #fbecd9;
+  --creme-d: #d8c6b8;
+  --pfirsich: #f4a98a;
+  --pfirsich-d: #c46f5f;
+  --teal: #7cc4bd;
+  --lila: #9b88c8;
+  --tinte: #231b36;
+  --karte: #2b2344;
+  --rand: #4b3f6e;
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #1c1730;
+  color: var(--creme);
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  min-height: 100vh;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; }
+
+#szene {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#garten {
+  display: block;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+  touch-action: manipulation;
+  cursor: default;
+}
+#garten.zeiger { cursor: pointer; }
+
+.pixeltext {
+  display: inline-block;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+  vertical-align: middle;
+}
+
+/* ---------- Kopf ---------- */
+#kopf {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(var(--sat) + 14px);
+  padding: 0 calc(18px + var(--sar)) 0 calc(18px + var(--sal));
+  text-align: center;
+  pointer-events: none;
+}
+#titel { margin: 0; line-height: 0; }
+#titel .pixeltext { filter: drop-shadow(0 0 5px rgba(40, 24, 62, .55)); }
+#gruss {
+  display: inline-block;
+  margin: 10px auto 0;
+  padding: 5px 12px;
+  border-radius: 10px;
+  background: rgba(35, 25, 52, .4);
+  max-width: 34em;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--creme);
+  text-shadow: 0 1px 0 rgba(30, 18, 46, .55), 0 0 14px rgba(30, 18, 46, .45);
+}
+
+/* ---------- Namensschilder ---------- */
+#schilder { position: absolute; inset: 0; pointer-events: none; }
+.schild {
+  position: absolute;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  border: 0;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--creme);
+  background: rgba(35, 25, 52, .68);
+  padding: 5px 8px 5px 7px;
+  border-radius: 7px;
+  max-width: 112px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  box-shadow: 0 2px 0 rgba(20, 12, 30, .35);
+}
+.schild span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.schild::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 8px;
+  border-radius: 50% 50% 50% 50% / 62% 62% 38% 38%;
+  background: var(--teal);
+  opacity: .22;
+}
+.schild.gegossen::before { opacity: 1; box-shadow: 0 0 6px rgba(124, 196, 189, .8); }
+.schild.welk { color: var(--creme-d); }
+
+/* ---------- Leerer Garten ---------- */
+#leer {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(320px, 86%);
+  text-align: center;
+  background: rgba(35, 25, 52, .8);
+  border: 2px solid rgba(155, 136, 200, .35);
+  border-radius: 14px;
+  padding: 14px 16px 16px;
+  font-size: 14px;
+  line-height: 1.4;
+  box-shadow: 0 4px 0 rgba(20, 12, 30, .35);
+}
+#leer p { margin: 0 0 10px; }
+#leer .leer-titel { font-weight: 700; font-size: 16px; }
+
+/* ---------- Knöpfe ---------- */
+.knopf {
+  font-size: 16px;
+  font-weight: 600;
+  border: 0;
+  border-radius: 10px;
+  padding: 13px 16px;
+  cursor: pointer;
+  color: var(--creme);
+  background: #3d3360;
+  box-shadow: 0 3px 0 #211a38;
+  transition: transform .08s, box-shadow .08s;
+}
+.knopf:active { transform: translateY(2px); box-shadow: 0 1px 0 #211a38; }
+.knopf.haupt { background: var(--pfirsich); color: #3a2440; box-shadow: 0 3px 0 var(--pfirsich-d); }
+.knopf.haupt:active { box-shadow: 0 1px 0 var(--pfirsich-d); }
+.knopf.leise { background: transparent; box-shadow: none; color: #c9b8d8; }
+.knopf.gefahr { background: #7a3f55; }
+.knopf:disabled { opacity: .55; cursor: default; transform: none; }
+
+.fab {
+  position: fixed;
+  right: calc(18px + var(--sar));
+  bottom: calc(var(--sab) + 18px);
+  width: 58px;
+  height: 58px;
+  border-radius: 16px;
+  border: 0;
+  background: var(--pfirsich);
+  box-shadow: 0 4px 0 var(--pfirsich-d), 0 10px 22px rgba(20, 10, 30, .35);
+  display: grid;
+  place-items: center;
+  z-index: 20;
+  cursor: pointer;
+}
+.fab:active { transform: translateY(3px); box-shadow: 0 1px 0 var(--pfirsich-d); }
+
+#version {
+  position: fixed;
+  left: calc(12px + var(--sal));
+  bottom: calc(var(--sab) + 10px);
+  font-size: 11px;
+  letter-spacing: .04em;
+  color: var(--creme);
+  opacity: .5;
+  pointer-events: none;
+  z-index: 20;
+  text-shadow: 0 1px 0 rgba(20, 12, 30, .6);
+}
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sab) + 92px);
+  transform: translate(-50%, 8px);
+  max-width: min(360px, 86vw);
+  width: max-content;
+  text-align: center;
+  background: rgba(35, 25, 52, .92);
+  border: 2px solid rgba(124, 196, 189, .35);
+  color: var(--creme);
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .35s, transform .35s;
+  z-index: 30;
+}
+#toast.zeigen { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- Blatt (Bottom-Sheet) ---------- */
+#schleier {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 10, 28, .5);
+  z-index: 40;
+  opacity: 0;
+  transition: opacity .28s;
+}
+#schleier.offen { opacity: 1; }
+
+#blatt {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  width: min(440px, 100%);
+  max-height: 88vh;
+  overflow-y: auto;
+  transform: translate(-50%, 105%);
+  transition: transform .34s cubic-bezier(.2, .8, .2, 1);
+  z-index: 41;
+  background: var(--karte);
+  border: 2px solid var(--rand);
+  border-bottom: 0;
+  border-radius: 18px 18px 0 0;
+  padding: 18px calc(18px + var(--sar)) calc(var(--sab) + 18px) calc(18px + var(--sal));
+  box-shadow: 0 -10px 30px rgba(10, 5, 20, .4);
+}
+#blatt.offen { transform: translate(-50%, 0); }
+.blatt-kopf { text-align: center; margin: 2px 0 14px; line-height: 0; }
+
+.feld {
+  width: 100%;
+  font: inherit;
+  font-size: 17px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 2px solid var(--rand);
+  background: #1f1932;
+  color: var(--creme);
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.feld::placeholder { color: #8f80a8; }
+.feld:focus { border-color: var(--teal); }
+.wackel { animation: wackel .35s; }
+@keyframes wackel { 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+
+.arten { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 14px 0 16px; }
+.art {
+  border: 2px solid transparent;
+  background: #352b52;
+  border-radius: 10px;
+  padding: 6px 1px 7px;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  min-width: 0;
+}
+.art span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art canvas { width: 40px; height: 50px; image-rendering: pixelated; }
+.art[aria-pressed="true"] { border-color: var(--teal); background: #3e3463; }
+
+.reihe { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.reihe .knopf { flex: 1 1 0; }
+.spalte { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+
+.pflanze-kopf { display: flex; gap: 14px; align-items: flex-end; margin-bottom: 8px; }
+.vorschau {
+  flex: none;
+  width: 80px;
+  height: 100px;
+  image-rendering: pixelated;
+  background: linear-gradient(#3a2f5a, #4a3a62 93%, #6b4a3e 93%, #5a3f36);
+  border-radius: 10px;
+  border: 2px solid var(--rand);
+}
+.pflanzen-name { margin: 0 0 2px; font-size: 22px; line-height: 1.2; word-break: break-word; }
+.meta { margin: 0 0 6px; font-size: 13px; color: var(--lila); }
+.stimmung { margin: 0; font-size: 14px; line-height: 1.4; }
+.frage { margin: 6px 0 0; width: 100%; font-size: 15px; }
+
+/* ---------- Debug ---------- */
+#debug {
+  position: fixed;
+  left: calc(8px + var(--sal));
+  top: calc(var(--sat) + 6px);
+  z-index: 50;
+  background: rgba(20, 14, 32, .85);
+  border: 1px solid #5a4c80;
+  border-radius: 8px;
+  padding: 4px 6px;
+  font-size: 11px;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  max-width: calc(100vw - 16px);
+}
+#debug button {
+  border: 0;
+  border-radius: 5px;
+  background: #3d3360;
+  padding: 3px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* ---------- Lofi-Schichten ---------- */
+#vignette {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 58;
+  background: radial-gradient(ellipse 85% 75% at 50% 45%, transparent 55%, rgba(22, 10, 34, .5) 100%);
+}
+#korn {
+  position: fixed;
+  inset: -64px;
+  pointer-events: none;
+  z-index: 59;
+  opacity: .11;
+  mix-blend-mode: overlay;
+  background-size: 128px 128px;
+  animation: korn .9s step-end infinite;
+}
+@keyframes korn {
+  0% { transform: translate(0, 0); }
+  20% { transform: translate(-37px, 21px); }
+  40% { transform: translate(18px, -42px); }
+  60% { transform: translate(-12px, 33px); }
+  80% { transform: translate(41px, 9px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #korn { animation: none; }
+  #blatt, #schleier, #toast { transition: none; }
+}
