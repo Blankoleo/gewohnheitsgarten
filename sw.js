@@ -1,11 +1,12 @@
 /* Gewohnheits-Garten – Service Worker.
    Bei jeder Änderung an den Dateien den Cache-Namen erhöhen (garten-v3, …). */
-const CACHE = 'garten-v2';
+const CACHE = 'garten-v3';
 const FILES = [
   './',
   './index.html',
   './style.css',
   './app.js',
+  './config.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -30,6 +31,7 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
+  // Supabase (anderer Origin) und alles Fremde nie cachen
   if (url.origin !== self.location.origin) return;
 
   const fromCache = () => caches.match(req, { ignoreSearch: true })

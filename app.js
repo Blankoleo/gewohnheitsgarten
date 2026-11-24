@@ -1,4 +1,4 @@
-/* Gewohnheits-Garten 1.1
+/* Gewohnheits-Garten 1.2 „Nachbarschaft“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage.
@@ -8,13 +8,17 @@
      ?zeit=21.5   feste Uhrzeit (Tag/Nacht testen)
      ?level=12    Garten-Stufe nur zur Ansicht erzwingen (wird nicht gespeichert)
      ?debug       nur das Debug-Feld einblenden
+     ?mock=a      Nachbarschaft ohne Supabase: Fake-Backend in localStorage. Jeder Profilname
+                  (a, b, …) ist ein eigenes „Gerät“ mit eigenem Garten – zwei Tabs mit
+                  ?mock=a und ?mock=b sehen sich gegenseitig. garten._fakeNachbar() legt
+                  erfundene Nachbargärten an.
    Mit einem dieser Parameter erscheint oben links ein Feld mit Tag, Uhrzeit, Stufe,
    „+1 Wo gießen“ (simuliert eine Woche Pflege für alle Pflanzen) und „Ereignis“.
 */
 'use strict';
 (function () {
 
-const VERSION = '1.1';
+const VERSION = '1.2';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -64,6 +68,10 @@ if (params.has('level')) {
   const l = parseInt(params.get('level'), 10);
   if (isFinite(l)) levelOverride = clamp(l, 0, 16);
 }
+// Mock-Modus: eigenes „Gerät“ je Profil, damit zwei Tabs desselben Origins zwei Gärten haben
+const MOCK = params.has('mock');
+const MOCK_PROFILE = MOCK ? (String(params.get('mock') || '1').replace(/[^a-z0-9]/gi, '').slice(0, 12) || '1') : '';
+const STORE = MOCK ? `${STORE_KEY}.mock.${MOCK_PROFILE}` : STORE_KEY;
 if (params.has('zeit')) {
   const z = parseFloat(String(params.get('zeit')).replace(',', '.'));
   if (isFinite(z)) hourOverride = ((z % 24) + 24) % 24;
@@ -85,6 +93,10 @@ function currentHour() {
    Schema 2 (1.1): Pflanze = { id, species, plantedDay, lastWatered, growth,
      goal (1|2|3|5|7 pro Woche), days: [Gießtage, letzte ~9 Wochen], paused (Tag|null), resumeDay }   */
 let state = null; // wird in init() geladen
+/* Was gerade gezeichnet wird: null = eigener Garten, sonst ein Nachbargarten
+   { id, name, level, plants (aus dem Schnappschuss nachgebaut), at, day }. Dieselbe Zeichen-Engine. */
+let view = null;
+const vPlants = () => view ? view.plants : state.garden.plants;
 
 function freshState() {
   return { schema: 2, garden: { id: uid(), plants: [], xp: 0, level: 0, deko: [] }, privat: { names: {} } };
@@ -99,7 +111,7 @@ function migratePlant(p) {
 }
 function loadState() {
   try {
-    const s = JSON.parse(localStorage.getItem(STORE_KEY));
+    const s = JSON.parse(localStorage.getItem(STORE));
     if (s && (s.schema === 1 || s.schema === 2) && s.garden && Array.isArray(s.garden.plants)) {
       s.privat = s.privat || { names: {} };
       s.privat.names = s.privat.names || {};
@@ -119,16 +131,19 @@ function saveState() {
   const L = levelOfXp(state.garden.xp);
   state.garden.level = L;
   state.garden.deko = DEKO.filter((d) => d.lv <= L).map((d) => d.id);
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+  try { localStorage.setItem(STORE, JSON.stringify(state)); }
   catch (e) { toast('Speichern hat leider nicht geklappt.'); }
+  scheduleSync();
 }
 const nameOf = (p) => state.privat.names[p.id] || 'Pflanze';
 
 /** Öffentlicher Schnappschuss ohne private Namen – Grundlage für eine spätere Nachbarschaft. */
 function gardenSnapshot() {
   const t = today();
-  const L = gardenLevel(), vit = vitality(t);
+  const own = state.garden.plants;
+  const L = levelOfXp(state.garden.xp), vit = vitality(t, own);
   return {
+    v: 2,
     id: state.garden.id,
     day: t,
     level: L,
@@ -140,7 +155,10 @@ function gardenSnapshot() {
       id: p.id, species: p.species, goal: p.goal, stage: stageOf(p.growth),
       growth: Math.round(p.growth * 10) / 10,
       condition: condition(p, t), wateredToday: wateredToday(p, t),
-      week: weekCount(p, t), paused: p.paused != null
+      week: weekCount(p, t), paused: p.paused != null,
+      // Rohdaten, damit Nachbarn den Zustand auch Tage später richtig sehen (keine Namen!)
+      last: p.lastWatered, planted: p.plantedDay, resume: p.resumeDay,
+      days: p.days.filter((d) => d > t - 14 && d <= t)
     }))
   };
 }
@@ -252,10 +270,13 @@ const DEKO = [
 ];
 const xpFor = (L) => 1.6 * Math.pow(L, 1.8);
 function levelOfXp(xp) { let L = 0; while (L < LEVEL_MAX && xp >= xpFor(L + 1)) L++; return L; }
-function gardenLevel() { return levelOverride != null ? levelOverride : levelOfXp(state.garden.xp); }
+function gardenLevel() {
+  if (view) return view.level;
+  return levelOverride != null ? levelOverride : levelOfXp(state.garden.xp);
+}
 /** 1 = alles frisch, 0 = alles welk. Pausierte zählen nicht. */
-function vitality(t = today()) {
-  const ps = state.garden.plants.filter((p) => p.paused == null);
+function vitality(t = today(), plants = vPlants()) {
+  const ps = plants.filter((p) => p.paused == null);
   if (!ps.length) return 1;
   let bad = 0;
   for (const p of ps) { const c = condition(p, t); bad += c === 2 ? 1 : c === 1 ? 0.35 : 0; }
@@ -865,11 +886,11 @@ function layout() {
   firstBase = horizonY + 38;
   // Riesige Pflanzen brauchen breitere Plätze: dann weniger Spalten, der Garten wächst nach unten.
   let maxK = 1;
-  for (const p of state.garden.plants) maxK = Math.max(maxK, STAGE_K[stageOf(p.growth)]);
+  for (const p of vPlants()) maxK = Math.max(maxK, STAGE_K[stageOf(p.growth)]);
   const need = Math.max(36, SW * maxK * 0.8);
   cols = clamp(Math.floor((W - 8) / need), 1, 6);
   const slotW = Math.min(Math.round(SLOT * Math.max(1, maxK * 0.85)), Math.floor((W - 8) / cols));
-  const plants = state.garden.plants, n = plants.length;
+  const plants = vPlants(), n = plants.length;
   const rows = Math.max(1, Math.ceil(n / cols));
   slots = []; beds = [];
   let base = firstBase;
@@ -1410,7 +1431,7 @@ function rareEvents() {
     if (Math.random() < rate * dt) startShootingStar();
   }
   if (pal.night > 0.6 && E >= 6 && T > swarmUntil && Math.random() < dt / 420) { swarmUntil = T + 30; eventToast('swarm', 'Ein Glühwürmchen-Schwarm tanzt durch den Garten.'); }
-  if (pal.night < 0.1 && E >= 8 && E < 15 && GS.vit > 0.9 && T > rainbowUntil && Math.random() < dt / 500) { rainbowUntil = T + 45; eventToast('rain', 'Ein Regenbogen über deinem Garten.'); }
+  if (pal.night < 0.1 && E >= 8 && E < 15 && GS.vit > 0.9 && T > rainbowUntil && Math.random() < dt / 500) { rainbowUntil = T + 45; eventToast('rain', view ? 'Ein Regenbogen über diesem Garten.' : 'Ein Regenbogen über deinem Garten.'); }
 }
 function startShootingStar() {
   shooting = { x: W * (0.35 + Math.random() * 0.6), y: 4 + Math.random() * horizonY * 0.3, t0: T, vx: -(55 + Math.random() * 25), vy: 22 + Math.random() * 10 };
@@ -1914,7 +1935,8 @@ function updateUI(skipLabelsState) {
   // Gruß
   const h = currentHour(), ph = phaseOf(h), t = today();
   const hallo = { morgen: 'Guten Morgen.', tag: 'Schönen Tag.', abend: 'Guten Abend.', nacht: 'Gute Nacht.' }[ph];
-  const plants = state.garden.plants;
+  const plants = vPlants();
+  if (view) { updateNeighborUI(); renderLabels(); renderDebug(); return; }
   let text;
   if (!plants.length) text = 'Dein Garten wartet auf die erste Pflanze.';
   else {
@@ -1941,10 +1963,12 @@ function renderLabels() {
     else if (p.goal < 7 && weekCount(p, t) >= p.goal) cls.push('satt');
     if (condition(p, t) === 2) cls.push('welk');
     if (p.paused != null) cls.push('pause');
-    const b = el('button', { class: cls.join(' '), type: 'button', 'aria-label': `${nameOf(p)} – Details` }, el('span', null, nameOf(p)));
+    if (view) cls.push('fremd');
+    const label = view ? SPECIES[p.species].name : nameOf(p);
+    const b = el('button', { class: cls.join(' '), type: 'button', 'aria-label': view ? plantInfo(p) : `${label} – Details` }, el('span', null, label));
     b.style.left = s.cx * PX + 'px';
     b.style.top = (s.base + 10) * PX + 'px';
-    b.addEventListener('click', () => openPlant(p));
+    b.addEventListener('click', () => view ? toast(plantInfo(p)) : openPlant(p));
     return b;
   }));
 }
@@ -2004,6 +2028,8 @@ function openLevel() {
 let sheetToken = 0;
 function openSheet(build) {
   const tok = ++sheetToken;
+  overviewOpen = false; nbConfirming = false;
+  blatt.classList.remove('nachbarschaft');
   blatt.replaceChildren();
   build(blatt);
   blatt.inert = false;
@@ -2015,6 +2041,7 @@ function openSheet(build) {
 }
 function closeSheet() {
   const tok = ++sheetToken;
+  overviewOpen = false;
   blatt.inert = true; // beim Zuklappen nicht mehr antippbar (sonst Doppel-Pflanzen)
   blatt.classList.remove('offen'); schleier.classList.remove('offen');
   setTimeout(() => {
@@ -2228,6 +2255,7 @@ function plantAt(e) {
 canvas.addEventListener('click', (e) => {
   const s = plantAt(e);
   if (!s) return;
+  if (view) { toast(plantInfo(s.p)); return; } // Nachbargarten: nur ansehen, nie gießen
   if (cans.some((k) => k.s.p.id === s.p.id)) return;
   if (wateredToday(s.p) || s.p.paused != null) openPlant(s.p);
   else giessen(s.p);
@@ -2285,7 +2313,7 @@ function simulateWeeks(n) {
 function debugEvent() {
   eventToastShown = {};
   if (pal.night > 0.5) { startShootingStar(); swarmUntil = T + 30; }
-  else { rainbowUntil = T + 45; eventToast('rain', 'Ein Regenbogen über deinem Garten.'); }
+  else { rainbowUntil = T + 45; eventToast('rain', view ? 'Ein Regenbogen über diesem Garten.' : 'Ein Regenbogen über deinem Garten.'); }
 }
 function setDebug(off, hour) {
   dayOffset = off; hourOverride = hour;
@@ -2297,6 +2325,597 @@ function setDebug(off, hour) {
   history.replaceState(null, '', u.toString());
   pendingVis.clear();
   refresh();
+}
+
+/* ------------------------------------------------------------------ Nachbarschaft (1.2)
+   Nur ansehen, nie mitgießen. Hochgeladen wird ausschließlich gardenSnapshot() (keine Namen der
+   Gewohnheiten) plus ein frei gewählter Gartenname. Backend: Supabase über die REST-API (PostgREST),
+   ganz ohne Bibliothek. Schreiben nur über die RPC-Funktion upsert_garden mit geheimem Token,
+   Lesen über get_gardens(ids). Live: Polling alle 25 s, solange ein Nachbargarten oder die
+   Übersicht sichtbar ist – nie bei verborgener Seite.
+   Ohne config.js-Werte (und ohne ?mock) ist all das unsichtbar und die App bleibt wie 1.1. */
+const CFG = window.GARTEN_CONFIG || {};
+const SB_URL = String(CFG.supabaseUrl || '').trim().replace(/\/+$/, '');
+const SB_KEY = String(CFG.supabaseAnonKey || '').trim();
+const NB_ON = MOCK || !!(SB_URL && SB_KEY);
+const NB_MAX = 20, POLL_MS = 25000, SYNC_GAP = 10000, SNAP_MAX = 20000, NAME_MAX = 40;
+const MOCK_DB = 'gewohnheitsgarten.mock-db';
+const CACHE_KEY = STORE + '.nachbarn';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function uuid4() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+function randomToken() {
+  const b = new Uint8Array(32);
+  crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+const cleanName = (s) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, NAME_MAX);
+
+/** Private Nachbarschaftsdaten – liegen in state.privat, verlassen nie das Gerät (außer Token-Prüfung). */
+function nbData() {
+  const pv = state.privat;
+  if (!pv.nb || typeof pv.nb !== 'object') pv.nb = {};
+  const nb = pv.nb;
+  if (!Array.isArray(nb.list)) nb.list = [];
+  nb.list = nb.list.filter((x) => x && UUID_RE.test(x.id)).slice(0, NB_MAX);
+  return nb;
+}
+/** Garten-ID (UUID) und Schreib-Token einmalig erzeugen. */
+function ensureIdentity() {
+  const nb = nbData();
+  let changed = false;
+  if (!UUID_RE.test(state.garden.id || '')) { state.garden.id = uuid4(); changed = true; }
+  if (!nb.token || nb.token.length < 32) { nb.token = randomToken(); changed = true; }
+  if (changed) saveState();
+}
+const sharing = () => NB_ON && !!nbData().name; // geteilt wird erst, wenn ein Gartenname gewählt ist
+
+/* ---------- Backend: Supabase (fetch) oder Mock (localStorage) ---------- */
+async function sbRpc(fn, body) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 10000);
+  const headers = { apikey: SB_KEY, 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (/^eyJ/.test(SB_KEY)) headers.Authorization = 'Bearer ' + SB_KEY; // alter anon-JWT; neue sb_publishable-Schlüssel nur als apikey
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, { method: 'POST', headers, body: JSON.stringify(body), signal: ctl.signal, cache: 'no-store' });
+    if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+    const txt = await res.text();
+    return txt ? JSON.parse(txt) : null;
+  } finally { clearTimeout(timer); }
+}
+function mockRead() { try { return JSON.parse(localStorage.getItem(MOCK_DB)) || {}; } catch (e) { return {}; } }
+const mockWait = () => new Promise((r) => setTimeout(r, 120 + Math.random() * 180));
+const backend = {
+  async upsert(id, token, name, snap) {
+    if (MOCK) {
+      await mockWait();
+      if (navigator.onLine === false) throw new Error('offline');
+      const db = mockRead(), h = 'h' + hashStr(token) + '.' + hashStr(token + 'x');
+      const row = db[id];
+      if (row && row.token_hash !== h) { const e = new Error('forbidden'); e.status = 403; throw e; }
+      db[id] = { token_hash: h, name: cleanName(name), snapshot: snap, updated_at: new Date().toISOString() };
+      localStorage.setItem(MOCK_DB, JSON.stringify(db));
+      return db[id].updated_at;
+    }
+    return sbRpc('upsert_garden', { p_id: id, p_token: token, p_name: cleanName(name), p_snapshot: snap });
+  },
+  async get(ids) {
+    if (!ids.length) return [];
+    if (MOCK) {
+      await mockWait();
+      if (navigator.onLine === false) throw new Error('offline');
+      const db = mockRead();
+      return ids.filter((id) => db[id]).map((id) => ({ id, name: db[id].name, snapshot: db[id].snapshot, updated_at: db[id].updated_at }));
+    }
+    const rows = await sbRpc('get_gardens', { p_ids: ids });
+    return Array.isArray(rows) ? rows : [];
+  }
+};
+
+/* ---------- Hochladen: gedrosselt, nur bei Änderung, offline später ---------- */
+let syncTimer = 0, syncBusy = false, syncAgain = false, lastSyncAt = 0, syncHintShown = false;
+function snapshotForUpload() {
+  const snap = gardenSnapshot();
+  let json = JSON.stringify(snap);
+  if (json.length > SNAP_MAX) { // sehr großer Garten: Wochenrohdaten kürzen, dann Pflanzen begrenzen
+    const w0 = weekStart(today());
+    snap.plants.forEach((p) => { p.days = p.days.filter((d) => d >= w0); delete p.id; });
+    json = JSON.stringify(snap);
+    while (json.length > SNAP_MAX && snap.plants.length) { snap.plants.pop(); json = JSON.stringify(snap); }
+  }
+  return snap;
+}
+function scheduleSync(soon) {
+  if (!sharing()) return;
+  clearTimeout(syncTimer);
+  const wait = soon ? 0 : Math.max(800, lastSyncAt + SYNC_GAP - Date.now());
+  syncTimer = setTimeout(syncNow, wait);
+}
+async function syncNow(force) {
+  if (!sharing()) return false;
+  if (syncBusy) { syncAgain = true; return false; }
+  const nb = nbData();
+  const snap = snapshotForUpload();
+  const body = JSON.stringify([nb.name, snap]);
+  const sig = hashStr(body) + ':' + body.length;
+  if (!force && sig === nb.sent) return true; // nichts geändert
+  if (navigator.onLine === false) { nb.dirty = true; return false; }
+  if (!force && Date.now() - lastSyncAt < SYNC_GAP) { scheduleSync(); return false; }
+  syncBusy = true; lastSyncAt = Date.now();
+  try {
+    await backend.upsert(state.garden.id, nb.token, nb.name, snap);
+    nb.sent = sig; nb.dirty = false;
+    try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) { /* egal */ }
+    return true;
+  } catch (e) {
+    nb.dirty = true;
+    if (!syncHintShown && navigator.onLine !== false && e.status) { syncHintShown = true; toastLater('Dein Garten konnte gerade nicht geteilt werden. Später klappt es wieder.'); }
+    return false;
+  } finally {
+    syncBusy = false;
+    if (syncAgain) { syncAgain = false; scheduleSync(); }
+  }
+}
+
+/* ---------- Nachbarn laden (Polling) ---------- */
+let nbCache = {};      // id -> { name, snap, at, loaded }
+let pollTimer = 0, lastPollAt = 0, overviewOpen = false, nbConfirming = false;
+function loadCache() {
+  try { const c = JSON.parse(localStorage.getItem(CACHE_KEY)); nbCache = c && typeof c === 'object' ? c : {}; } catch (e) { nbCache = {}; }
+  const ids = new Set(nbData().list.map((x) => x.id));
+  for (const k of Object.keys(nbCache)) if (!ids.has(k)) delete nbCache[k];
+}
+function saveCache() { try { localStorage.setItem(CACHE_KEY, JSON.stringify(nbCache)); } catch (e) { /* Platz: nicht schlimm */ } }
+const pollWanted = () => NB_ON && !document.hidden && nbData().list.length > 0 && (!!view || overviewOpen);
+function schedulePoll(delay = POLL_MS) {
+  clearTimeout(pollTimer);
+  if (pollWanted()) pollTimer = setTimeout(() => pollNow(), delay);
+}
+async function pollNow(always) {
+  clearTimeout(pollTimer);
+  if (!NB_ON || (!always && !pollWanted())) return;
+  const nb = nbData(), ids = nb.list.map((x) => x.id);
+  if (!ids.length) return;
+  lastPollAt = Date.now();
+  try {
+    const rows = await backend.get(ids);
+    let changedView = false, changedAny = false;
+    for (const r of rows) {
+      if (!r || !UUID_RE.test(r.id) || !ids.includes(r.id)) continue;
+      const snap = sanitizeSnap(r.snapshot);
+      const old = nbCache[r.id];
+      const name = cleanName(r.name) || 'Nachbargarten';
+      if (!old || old.at !== r.updated_at || old.name !== name) {
+        nbCache[r.id] = { name, snap, at: r.updated_at, loaded: Date.now() };
+        changedAny = true;
+        if (view && view.id === r.id) changedView = true;
+      }
+      const ent = nb.list.find((x) => x.id === r.id);
+      if (ent && ent.name !== name) ent.name = name;
+    }
+    saveCache();
+    if (changedView) { view = buildView(view.id); refresh(); }
+    else if (view) updateNeighborUI(); // „zuletzt aktiv“ weiterzählen
+    renderNav();
+    if (changedAny && overviewOpen && !nbConfirming) openNeighborhood(); // Übersicht auffrischen
+  } catch (e) { /* offline oder Server weg: beim nächsten Mal */ }
+  schedulePoll();
+}
+
+/** Daten aus dem Netz sind fremd: nur bekannte Felder, Zahlen geprüft, Größe begrenzt. */
+function sanitizeSnap(s) {
+  if (!s || typeof s !== 'object') return { level: 0, day: today(), plants: [] };
+  const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
+  const day = Math.round(num(s.day, today()));
+  const plants = (Array.isArray(s.plants) ? s.plants : []).slice(0, 60).filter((p) => p && SPECIES_ORDER.includes(p.species)).map((p, i) => ({
+    id: String(p.id == null ? i : p.id).slice(0, 40), species: p.species,
+    goal: GOALS.includes(p.goal) ? p.goal : 7,
+    growth: clamp(num(p.growth, 0), 0, 400),
+    last: p.last == null ? (p.wateredToday ? day : null) : Math.round(num(p.last, day)),
+    planted: Math.round(num(p.planted, day - 7)),
+    resume: p.resume == null ? null : Math.round(num(p.resume, day)),
+    days: (Array.isArray(p.days) ? p.days : []).slice(-14).filter((d) => typeof d === 'number' && isFinite(d)).map(Math.round),
+    paused: !!p.paused
+  }));
+  return { level: clamp(Math.round(num(s.level, 0)), 0, LEVEL_MAX), day, plants };
+}
+/** Nachbar-Pflanzen so nachbauen, dass condition()/weekCount() mit dem heutigen Tag des Betrachters rechnen. */
+function buildView(id) {
+  const c = nbCache[id], ent = nbData().list.find((x) => x.id === id);
+  const snap = c ? c.snap : { level: 0, day: today(), plants: [] };
+  const plants = snap.plants.map((p) => ({
+    id: p.id, species: p.species, goal: p.goal, growth: p.growth,
+    lastWatered: p.last, plantedDay: p.planted, resumeDay: p.resume, days: p.days.slice(),
+    paused: p.paused ? snap.day : null, nb: true
+  }));
+  return { id, name: (c && c.name) || (ent && ent.name) || 'Nachbargarten', level: snap.level, plants, at: c ? c.at : null, loaded: !!c };
+}
+function gardenStatus(plants, t = today()) {
+  if (!plants.length) return { key: 'leer', emoji: '🌱', text: 'noch leer' };
+  if (plants.every((p) => p.paused != null)) return { key: 'pause', emoji: '💤', text: 'Pause' };
+  const vit = vitality(t, plants);
+  if (vit < 0.75 || plants.some((p) => condition(p, t) === 2)) return { key: 'durst', emoji: '🥀', text: 'durstig' };
+  return { key: 'bluet', emoji: '🌸', text: 'blüht' };
+}
+function agoText(iso) {
+  const ms = Date.now() - Date.parse(iso);
+  if (!isFinite(ms)) return '';
+  const m = Math.floor(ms / 60000);
+  if (m < 2) return 'gerade eben aktiv';
+  if (m < 60) return `zuletzt aktiv vor ${m} Min.`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `zuletzt aktiv vor ${h} Std.`;
+  const d = Math.floor(h / 24);
+  return `zuletzt aktiv vor ${d} ${d === 1 ? 'Tag' : 'Tagen'}`;
+}
+function plantInfo(p) { return `${SPECIES[p.species].name} · ${stageName(p.species, stageOf(p.growth))}${p.paused != null ? ' · Pause' : ''}`; }
+
+/* ---------- Gartenzaun-Ansicht: eigener Garten + Nachbarn ---------- */
+let viewIdx = 0;
+const gardenIds = () => [null].concat(nbData().list.map((x) => x.id));
+function showGarden(idx, dir) {
+  const ids = gardenIds();
+  idx = clamp(idx, 0, ids.length - 1);
+  // laufende Gieß-Animation im eigenen Garten sofort abschließen
+  for (const k of cans) if (!k.done) { k.done = true; pendingVis.delete(k.s.p.id); if (k.msg) toast(k.msg); if (k.res && k.res.levelUp) celebrate(k.res.levelUp); }
+  cans.length = 0; drops.length = 0; sparks.length = 0; petals.length = 0; spray.length = 0;
+  pendingVis.clear(); wiggle.clear();
+  viewIdx = idx;
+  view = ids[idx] ? buildView(ids[idx]) : null;
+  document.body.classList.toggle('nachbar-ansicht', !!view);
+  $('titel').replaceChildren(titleNode());
+  $('titel').setAttribute('aria-label', view ? view.name : 'Gewohnheits-Garten');
+  refresh();
+  renderNav();
+  if (dir) { canvas.classList.remove('rein-l', 'rein-r'); void canvas.offsetWidth; canvas.classList.add(dir > 0 ? 'rein-r' : 'rein-l'); }
+  if (view && Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll();
+}
+function titleNode() {
+  const sc = innerWidth < 400 ? 2 : 3;
+  if (!view) return pixelText('Gewohnheits-Garten', sc);
+  const name = view.name;
+  const pt = pixelText(name, sc);
+  if (pt.width * sc > innerWidth - 40 || /[^A-Za-zÄÖÜäöüß0-9 .\-!?:+,]/.test(name)) {
+    const pt2 = pixelText(name, 2);
+    if (pt2.width * 2 <= innerWidth - 40 && !/[^A-Za-zÄÖÜäöüß0-9 .\-!?:+,]/.test(name)) return pt2;
+    return el('span', { class: 'titel-text' }, name);
+  }
+  return pt;
+}
+function updateNeighborUI() {
+  if (!view) return;
+  const t = today(), plants = view.plants;
+  $('titel').setAttribute('aria-label', view.name);
+  $('stufe').hidden = true;
+  $('leer').hidden = true;
+  const parts = [];
+  if (!view.loaded) parts.push('wird geladen …');
+  else {
+    const st = gardenStatus(plants, t);
+    parts.push(`Stufe ${view.level}`);
+    parts.push(`${st.text} ${st.emoji}`);
+    if (plants.some((p) => wateredToday(p, t))) parts.push('heute gegossen 💧');
+    if (view.at) parts.push(agoText(view.at));
+  }
+  $('gruss').textContent = parts.join(' · ');
+}
+
+/* Leiste mit Punkten oben + Pfeile am Zaun */
+const punkte = el('nav', { id: 'punkte', 'aria-label': 'Gärten', hidden: '' });
+const pfeilL = el('button', { id: 'pfeil-l', class: 'zaun-pfeil', type: 'button', 'aria-label': 'Vorheriger Garten', hidden: '' }, '‹');
+const pfeilR = el('button', { id: 'pfeil-r', class: 'zaun-pfeil', type: 'button', 'aria-label': 'Nächster Garten', hidden: '' }, '›');
+function renderNav() {
+  const ids = gardenIds(), many = NB_ON && ids.length > 1;
+  punkte.hidden = !many; pfeilL.hidden = !many || viewIdx === 0; pfeilR.hidden = !many || viewIdx >= ids.length - 1;
+  if (!many) { punkte.replaceChildren(); return; }
+  if (viewIdx >= ids.length) viewIdx = ids.length - 1;
+  punkte.replaceChildren(...ids.map((id, i) => {
+    const c = id && nbCache[id];
+    let cls = 'punkt' + (i === 0 ? ' heim' : '') + (i === viewIdx ? ' aktiv' : '');
+    if (c) cls += ' ' + gardenStatus(buildView(id).plants).key;
+    const nm = i === 0 ? 'Dein Garten' : (c ? c.name : (nbData().list[i - 1] || {}).name || 'Nachbargarten');
+    const b = el('button', { class: cls, type: 'button', 'aria-label': nm, 'aria-current': String(i === viewIdx) });
+    b.addEventListener('click', () => { if (i !== viewIdx) showGarden(i, i > viewIdx ? 1 : -1); });
+    return b;
+  }));
+  const y = Math.round((horizonY - 4) * PX);
+  pfeilL.style.top = pfeilR.style.top = y + 'px';
+}
+pfeilL.addEventListener('click', () => showGarden(viewIdx - 1, -1));
+pfeilR.addEventListener('click', () => showGarden(viewIdx + 1, 1));
+
+/* Wischen nach links/rechts (vertikales Scrollen bleibt frei) */
+let tStart = null;
+szene.addEventListener('touchstart', (e) => {
+  if (e.touches.length !== 1) { tStart = null; return; }
+  tStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
+}, { passive: true });
+szene.addEventListener('touchend', (e) => {
+  if (!tStart || !NB_ON || gardenIds().length < 2) return;
+  const tc = e.changedTouches[0], dx = tc.clientX - tStart.x, dy = tc.clientY - tStart.y;
+  const fast = Date.now() - tStart.t < 700;
+  tStart = null;
+  if (!fast || Math.abs(dx) < 55 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+  if (dx < 0 && viewIdx < gardenIds().length - 1) showGarden(viewIdx + 1, 1);
+  else if (dx > 0 && viewIdx > 0) showGarden(viewIdx - 1, -1);
+}, { passive: true });
+document.addEventListener('keydown', (e) => {
+  if (!NB_ON || !blatt.hidden || gardenIds().length < 2) return;
+  if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  if (e.key === 'ArrowRight' && viewIdx < gardenIds().length - 1) showGarden(viewIdx + 1, 1);
+  if (e.key === 'ArrowLeft' && viewIdx > 0) showGarden(viewIdx - 1, -1);
+});
+
+/* ---------- Mini-Vorschau (einmal gerendertes kleines Bild, kein dauerhaftes Canvas) ---------- */
+function miniPreview(plants, level) {
+  const w = 72, h = 46, cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const c = cv.getContext('2d'), hz = 16;
+  for (let y = 0; y < hz; y++) { c.fillStyle = css(mix(pal.top, pal.bot, y / hz)); c.fillRect(0, y, w, 1); }
+  c.fillStyle = css(pal.near); c.fillRect(0, hz - 3, w, 3);
+  for (let y = hz; y < h; y++) { c.fillStyle = css(A(mix(GRASS_TOP, GRASS_BOT, (y - hz) / (h - hz)))); c.fillRect(0, y, w, 1); }
+  c.fillStyle = css(A(FENCE_D)); c.fillRect(0, hz - 2, w, 1);
+  for (let x = 1; x < w; x += 5) { c.fillStyle = css(A(FENCE)); c.fillRect(x, hz - 4, 1, 5); }
+  if (level >= 2) for (let x = 6; x < w; x += 16) { c.fillStyle = css(LANTERN_COLS[((x / 16) | 0) % 3]); c.fillRect(x, 3, 2, 2); }
+  const show = plants.slice(0, 6), n = show.length, base = h - 6;
+  if (n) {
+    c.fillStyle = css(A(WOOD)); c.fillRect(2, base, w - 4, 3);
+    c.fillStyle = css(A(SOIL)); c.fillRect(3, base - 1, w - 6, 1);
+  }
+  const t = today();
+  show.forEach((p, i) => {
+    const spr = getSprite(p.species, stageOf(p.growth), condition(p, t), false);
+    const k = Math.min(0.5, 30 / Math.max(1, spr.height - spr.topRow));
+    const dw = spr.width * k, dh = spr.height * k, cx = (w / (n + 1)) * (i + 1);
+    c.drawImage(spr, cx - dw / 2, base - dh + 1, dw, dh);
+  });
+  const img = new Image();
+  img.src = cv.toDataURL();
+  img.className = 'mini';
+  img.alt = '';
+  img.width = w * 2; img.height = h * 2;
+  return img;
+}
+
+/* ---------- Übersicht „Nachbarschaft“ ---------- */
+function openNeighborhood() {
+  if (!NB_ON) { toast('Die Nachbarschaft ist bald verfügbar.'); return; }
+  const keep = blatt.scrollTop;
+  openSheet((b) => {
+    overviewOpen = true;
+    b.setAttribute('aria-label', 'Nachbarschaft');
+    b.classList.add('nachbarschaft');
+    const nb = nbData(), t = today();
+    const liste = el('ul', { class: 'nb-liste' });
+    const own = state.garden.plants, ownSt = gardenStatus(own, t);
+    const ownRow = el('li', null,
+      el('button', { class: 'nb-garten', type: 'button' }, miniPreview(own, levelOfXp(state.garden.xp)),
+        el('span', { class: 'nb-text' }, el('strong', null, nb.name || 'Dein Garten'),
+          el('span', null, `Dein Garten · Stufe ${levelOfXp(state.garden.xp)} · ${ownSt.emoji}`),
+          el('span', { class: 'leise' }, nb.name ? 'wird mit deinen Nachbarn geteilt' : 'noch nicht geteilt'))));
+    ownRow.firstChild.addEventListener('click', () => { closeSheet(); showGarden(0, -1); });
+    liste.append(ownRow);
+    nb.list.forEach((ent, i) => {
+      const v = buildView(ent.id), st = gardenStatus(v.plants, t);
+      const info = v.loaded ? `Stufe ${v.level} · ${st.text} ${st.emoji}${v.plants.some((p) => wateredToday(p, t)) ? ' · 💧' : ''}` : 'noch nicht geladen';
+      const go = el('button', { class: 'nb-garten', type: 'button' }, miniPreview(v.plants, v.level),
+        el('span', { class: 'nb-text' }, el('strong', null, v.name), el('span', null, info), el('span', { class: 'leise' }, v.at ? agoText(v.at) : '')));
+      go.addEventListener('click', () => { closeSheet(); showGarden(i + 1, 1); });
+      const weg = el('button', { class: 'nb-weg', type: 'button', 'aria-label': `${v.name} entfernen` }, '✕');
+      const li = el('li', null, go, weg);
+      weg.addEventListener('click', () => {
+        nbConfirming = true;
+        const yes = el('button', { class: 'knopf gefahr', type: 'button' }, 'Entfernen');
+        const no = el('button', { class: 'knopf leise', type: 'button' }, 'Behalten');
+        yes.addEventListener('click', () => { removeNeighbor(ent.id); toast(`${v.name} ist nicht mehr in deiner Nachbarschaft.`); openNeighborhood(); });
+        no.addEventListener('click', () => openNeighborhood());
+        li.replaceChildren(el('div', { class: 'nb-frage' }, el('p', { class: 'frage' }, `${v.name} aus der Nachbarschaft entfernen? Du siehst den Garten dann nicht mehr (dein eigener bleibt für sie sichtbar, falls sie dich als Nachbar haben).`), el('div', { class: 'reihe' }, no, yes)));
+      });
+      liste.append(li);
+    });
+    const einladen = el('button', { class: 'knopf haupt', type: 'button' }, 'Nachbarn einladen');
+    einladen.addEventListener('click', () => invite());
+    const nameBtn = el('button', { class: 'knopf', type: 'button' }, nb.name ? 'Gartenname ändern' : 'Gartenname wählen');
+    nameBtn.addEventListener('click', () => askName(() => openNeighborhood()));
+    const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Schließen');
+    zu.addEventListener('click', closeSheet);
+    const hinweis = nb.list.length ? '' : el('p', { class: 'stimmung leise' }, 'Lade Freunde ein: Ihr seht dann gegenseitig, wie eure Gärten wachsen. Nur ansehen – gießen kann jeder nur seinen eigenen. Die Namen deiner Gewohnheiten bleiben auf deinem Gerät.');
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Nachbarschaft', 3)), liste, hinweis,
+      el('div', { class: 'reihe' }, einladen), el('div', { class: 'reihe' }, nameBtn, zu),
+      MOCK ? el('p', { class: 'stimmung leise' }, `Testmodus (Mock, Profil „${MOCK_PROFILE}“) – kein echtes Supabase.`) : '');
+  });
+  blatt.scrollTop = keep;
+  if (Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll();
+}
+function removeNeighbor(id) {
+  const nb = nbData();
+  const idx = nb.list.findIndex((x) => x.id === id);
+  if (idx < 0) return;
+  nb.list.splice(idx, 1);
+  delete nbCache[id];
+  saveCache(); saveState();
+  if (view && view.id === id) showGarden(0);
+  else { if (viewIdx > idx) viewIdx--; renderNav(); }
+}
+
+/** Gartenname einmal abfragen (änderbar). */
+function askName(then) {
+  const nb = nbData();
+  openSheet((b) => {
+    b.setAttribute('aria-label', 'Gartenname');
+    const inp = el('input', { class: 'feld', type: 'text', maxlength: String(NAME_MAX), value: nb.name || '', placeholder: 'z. B. Leos Garten', autocomplete: 'off', enterkeyhint: 'done', 'aria-label': 'Name deines Gartens' });
+    const ok = el('button', { class: 'knopf haupt', type: 'button' }, 'Speichern');
+    const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Abbrechen');
+    ok.addEventListener('click', () => {
+      const v = cleanName(inp.value);
+      if (!v) { inp.classList.remove('wackel'); void inp.offsetWidth; inp.classList.add('wackel'); inp.focus(); return; }
+      nb.name = v;
+      ensureIdentity();
+      saveState();
+      syncNow(true);
+      if (then) then(); else closeSheet();
+    });
+    ab.addEventListener('click', closeSheet);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') ok.click(); });
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Dein Garten', 3)),
+      el('p', { class: 'stimmung' }, 'Wie soll dein Garten bei deinen Nachbarn heißen? Geteilt werden nur Pflanzenarten und wie es ihnen geht – nie die Namen deiner Gewohnheiten.'),
+      inp, el('div', { class: 'reihe' }, ab, ok));
+    if (!matchMedia('(pointer: coarse)').matches) setTimeout(() => inp.focus(), 60);
+  });
+}
+
+function inviteLink() {
+  const u = new URL(location.pathname, location.origin);
+  u.searchParams.set('nachbar', state.garden.id);
+  if (MOCK) u.searchParams.set('mock', '1');
+  return u.toString();
+}
+/** Einladungslink per Web Share API teilen, sonst kopieren (oder zum Abschreiben zeigen). */
+async function invite() {
+  if (!NB_ON) { toast('Die Nachbarschaft ist bald verfügbar.'); return; }
+  if (!nbData().name) { askName(() => invite()); return; }
+  ensureIdentity();
+  syncNow(true); // damit der Garten schon da ist, wenn der Link geöffnet wird
+  const url = inviteLink(), name = nbData().name;
+  if (navigator.share) {
+    try { await navigator.share({ title: 'Gewohnheits-Garten', text: `Werde Nachbar von „${name}“ im Gewohnheits-Garten:`, url }); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  try { await navigator.clipboard.writeText(url); toast('Einladungslink kopiert. Schick ihn deinen Freunden.'); return; }
+  catch (e) { /* kein Zugriff: Link zeigen */ }
+  openSheet((b) => {
+    const inp = el('input', { class: 'feld', type: 'text', readonly: '', value: url, 'aria-label': 'Einladungslink' });
+    const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Fertig');
+    zu.addEventListener('click', closeSheet);
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Einladung', 3)), el('p', { class: 'stimmung' }, 'Kopiere diesen Link und schick ihn deinen Freunden:'), inp, el('div', { class: 'reihe' }, zu));
+    setTimeout(() => { inp.focus(); inp.select(); }, 60);
+  });
+}
+
+/** ?nachbar=<id> aus einem Einladungslink: freundlich fragen, dann merken. */
+async function handleInviteParam() {
+  const raw = params.get('nachbar');
+  if (raw == null) return;
+  const u = new URL(location.href);
+  u.searchParams.delete('nachbar');
+  history.replaceState(null, '', u.toString());
+  const id = String(raw).trim().toLowerCase();
+  if (!NB_ON) { toastLater('Die Nachbarschaft ist bald verfügbar. Dein Garten funktioniert schon.'); return; }
+  if (!UUID_RE.test(id)) { toastLater('Dieser Einladungslink ist leider kaputt.'); return; }
+  if (id === state.garden.id) { toastLater('Das ist dein eigener Garten. Schick den Link an deine Freunde.'); return; }
+  const nb = nbData();
+  const known = nb.list.findIndex((x) => x.id === id);
+  if (known >= 0) { showGarden(known + 1, 1); return; }
+  if (nb.list.length >= NB_MAX) { toastLater(`Mehr als ${NB_MAX} Nachbarn passen nicht an den Zaun. Entferne erst einen.`); return; }
+  let row = null, offline = false;
+  try { row = (await backend.get([id]))[0] || null; } catch (e) { offline = true; }
+  if (!row && !offline) { toastLater('Diesen Garten gibt es (noch) nicht. Vielleicht später nochmal öffnen.'); return; }
+  const name = row ? (cleanName(row.name) || 'Nachbargarten') : 'Nachbargarten';
+  openSheet((b) => {
+    b.setAttribute('aria-label', 'Nachbar hinzufügen');
+    const ja = el('button', { class: 'knopf haupt', type: 'button' }, 'Hinzufügen');
+    const nein = el('button', { class: 'knopf leise', type: 'button' }, 'Lieber nicht');
+    let done = false;
+    ja.addEventListener('click', () => {
+      if (done) return; done = true;
+      if (!nb.list.some((x) => x.id === id)) nb.list.push({ id, name });
+      if (row) nbCache[id] = { name, snap: sanitizeSnap(row.snapshot), at: row.updated_at, loaded: Date.now() };
+      saveCache(); saveState();
+      showGarden(nb.list.length, 1);
+      offerReturn(name);
+    });
+    nein.addEventListener('click', closeSheet);
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Nachbarschaft', 3)),
+      el('p', { class: 'stimmung gross' }, `„${name}“ als Nachbar hinzufügen?`),
+      el('p', { class: 'stimmung leise' }, offline ? 'Gerade offline – der Garten erscheint, sobald wieder Netz da ist.' : 'Du siehst dann, wie es in diesem Garten wächst. Nur ansehen, nicht gießen.'),
+      el('div', { class: 'reihe' }, nein, ja));
+  });
+}
+/** Gegenseitig: eigenen Link zurückschicken anbieten. */
+function offerReturn(name) {
+  openSheet((b) => {
+    const ja = el('button', { class: 'knopf haupt', type: 'button' }, 'Meinen Link schicken');
+    const nein = el('button', { class: 'knopf leise', type: 'button' }, 'Später');
+    ja.addEventListener('click', () => { closeSheet(); setTimeout(invite, 360); });
+    nein.addEventListener('click', closeSheet);
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Willkommen', 3)),
+      el('p', { class: 'stimmung' }, `„${name}“ steht jetzt an deinem Zaun. Wisch nach links und rechts, um zwischen den Gärten zu wechseln.`),
+      el('p', { class: 'stimmung leise' }, 'Soll „' + name + '“ auch deinen Garten sehen? Dann schick deinen Link zurück.'),
+      el('div', { class: 'reihe' }, nein, ja));
+  });
+}
+
+/* ---------- Testhilfe: erfundene Nachbarn ---------- */
+async function fakeNeighbors(n = 3) {
+  if (!MOCK) return 'Nur im Mock-Modus (?mock=a).';
+  const t = today(), nb = nbData();
+  const R = mulberry32((Date.now() & 0xffff) ^ 0x2f);
+  const recipes = [
+    { name: 'Mias Garten', level: 3, stages: [[1, 'farn', 7], [2, 'kaktus', 1], [3, 'sonnenblume', 3]], water: [true, false, false], late: [0, 2, 9] },
+    { name: 'Bens Balkon', level: 9, stages: [[4, 'kirschbaum', 3], [5, 'monstera', 7], [4, 'sonnenblume', 3], [6, 'farn', 7]], water: [true, true, false, true], late: [0, 0, 1, 0] },
+    { name: 'Omas Beet', level: 16, stages: [[7, 'kirschbaum', 3], [7, 'sonnenblume', 2], [6, 'kaktus', 1], [7, 'monstera', 5], [5, 'farn', 7]], water: [true, true, false, true, false], late: [0, 0, 3, 0, 0], pause: [4] }
+  ].slice(0, clamp(n, 1, 3));
+  const added = [];
+  for (const rc of recipes) {
+    if (nb.list.length >= NB_MAX) break;
+    const id = uuid4();
+    const plants = rc.stages.map(([st, sp, goal], i) => {
+      const last = rc.water[i] ? t : t - 1 - rc.late[i];
+      const days = [];
+      for (let d = last; d > t - 14; d -= Math.max(1, Math.round(7 / goal))) days.push(d);
+      return { id: uuid4(), species: sp, goal, stage: st, growth: STAGE_MIN[st] + R() * 0.9,
+        condition: 0, wateredToday: rc.water[i], week: 0, paused: !!(rc.pause && rc.pause.includes(i)),
+        last, planted: t - 120, resume: null, days: days.reverse() };
+    });
+    const snap = { v: 2, id, day: t, level: rc.level, xp: xpFor(rc.level), vitality: 1, deko: [], visible: [], plants };
+    await backend.upsert(id, randomToken(), rc.name, snap);
+    nb.list.push({ id, name: rc.name });
+    added.push(rc.name);
+  }
+  saveState();
+  await pollNow(true);
+  renderNav();
+  return added;
+}
+
+function setupNeighborhood() {
+  $('szene').append(pfeilL, pfeilR);
+  $('titel').after(punkte);
+  const knopf = $('nachbarn');
+  if (!NB_ON) { knopf.hidden = true; handleInviteParam(); return; }
+  knopf.hidden = false;
+  knopf.append(houseIcon());
+  knopf.addEventListener('click', openNeighborhood);
+  ensureIdentity();
+  loadCache();
+  renderNav();
+  addEventListener('online', () => { if (nbData().dirty) scheduleSync(true); if (view || overviewOpen) pollNow(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { clearTimeout(pollTimer); return; }
+    if (nbData().dirty) scheduleSync(true);
+    if (pollWanted()) { if (Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll(); }
+  });
+  scheduleSync();                    // beim Start (nur bei Änderung)
+  if (nbData().list.length) pollNow(true); // einmal frische Stände für die Punkte-Leiste
+  handleInviteParam();
+}
+function houseIcon() {
+  const c = document.createElement('canvas'); c.width = 13; c.height = 11;
+  const x = c.getContext('2d');
+  const R = (col, a, b, w, h) => { x.fillStyle = col; x.fillRect(a, b, w, h); };
+  for (let i = 0; i < 5; i++) R('#c46f5f', 4 - i + 2, i, 1 + i * 2 + 0, 1);
+  R('#fbecd9', 2, 5, 9, 5); R('#7a5a6a', 5, 7, 3, 3); R('#7cc4bd', 3, 6, 2, 2); R('#7cc4bd', 8, 6, 2, 2);
+  R('#d8c6b8', 0, 9, 13, 1); R('#d8c6b8', 0, 7, 1, 3); R('#d8c6b8', 12, 7, 1, 3);
+  c.className = 'pixeltext';
+  c.style.width = '39px'; c.style.height = '33px';
+  return c;
 }
 
 /* ------------------------------------------------------------------ Start */
@@ -2313,7 +2932,7 @@ function makeGrain() {
 }
 
 function init() {
-  const raw = localStorage.getItem(STORE_KEY);
+  const raw = localStorage.getItem(STORE);
   state = loadState();
   if (raw && !raw.includes('"schema":2')) saveState(); // 1.0-Daten gleich im neuen Format sichern
   $('titel').append(pixelText('Gewohnheits-Garten', innerWidth < 400 ? 2 : 3));
@@ -2325,6 +2944,7 @@ function init() {
   makeGrain();
   refresh();
   start();
+  setupNeighborhood();
 
   let lastDay = today(), lastMin = -1;
   setInterval(() => {
@@ -2338,8 +2958,9 @@ function init() {
   addEventListener('resize', () => {
     clearTimeout(rt);
     rt = setTimeout(() => {
-      const t = $('titel'); t.replaceChildren(pixelText('Gewohnheits-Garten', innerWidth < 400 ? 2 : 3));
+      $('titel').replaceChildren(titleNode());
       refresh();
+      renderNav();
     }, 150);
   });
   document.addEventListener('visibilitychange', () => {
@@ -2360,7 +2981,11 @@ window.garten = {
   _water: (id) => { const p = state.garden.plants.find((x) => x.id === id); const r = water(p); saveState(); return r; },
   _pause: (id) => togglePause(state.garden.plants.find((x) => x.id === id)),
   _cond: (id) => condition(state.garden.plants.find((x) => x.id === id)),
-  _draw: () => draw()
+  _draw: () => draw(),
+  // Nachbarschaft (Test/Debug)
+  _fakeNachbar: fakeNeighbors, _poll: () => pollNow(true), _sync: () => syncNow(true),
+  _upload: snapshotForUpload, _nb: () => ({ on: NB_ON, mock: MOCK, profile: MOCK_PROFILE, id: state.garden.id, name: nbData().name, list: nbData().list.slice(), view: view && view.id, idx: viewIdx }),
+  _show: (i) => showGarden(i), _invite: inviteLink, _removeNachbar: removeNeighbor
 };
 init();
 })();
