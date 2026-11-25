@@ -1,4 +1,4 @@
-/* Gewohnheits-Garten 1.6 „Konto“
+/* Gewohnheits-Garten 1.7 „Gewohnheiten zeigen“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage.
@@ -19,7 +19,7 @@
 'use strict';
 (function () {
 
-const VERSION = '1.6';
+const VERSION = '1.7';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -161,6 +161,8 @@ function gardenSnapshot() {
       // Rohdaten, damit Nachbarn den Zustand auch Tage später richtig sehen (keine Namen!)
       last: p.lastWatered, planted: p.plantedDay, resume: p.resumeDay,
       days: p.days.filter((d) => d > t - 14 && d <= t),
+      // 1.7: Namen nur, wenn man sie für die Nachbarn freigegeben hat
+      ...(state.privat.namenTeilen && state.privat.names[p.id] ? { name: String(state.privat.names[p.id]).slice(0, 30) } : {}),
       ...(fotos.has(p.id) ? { foto: fotos.get(p.id) } : {})
     }))
   };
@@ -2127,7 +2129,7 @@ function renderLabels() {
     if (condition(p, t) === 2) cls.push('welk');
     if (p.paused != null) cls.push('pause');
     if (view) cls.push('fremd');
-    const label = view ? SPECIES[p.species].name : nameOf(p);
+    const label = view ? fremdName(p) : nameOf(p);
     const b = el('button', { class: cls.join(' '), type: 'button', 'aria-label': view ? plantInfo(p) : `${label} – Details` }, el('span', null, label));
     b.style.left = s.cx * PX + 'px';
     b.style.top = (s.base + 10) * PX + 'px';
@@ -2760,6 +2762,7 @@ function sanitizeSnap(s) {
     resume: p.resume == null ? null : Math.round(num(p.resume, day)),
     days: (Array.isArray(p.days) ? p.days : []).slice(-14).filter((d) => typeof d === 'number' && isFinite(d)).map(Math.round),
     paused: !!p.paused,
+    name: cleanName(p.name).slice(0, 30) || null,
     foto: sanitizeFoto(p.foto)
   }));
   return { level: clamp(Math.round(num(s.level, 0)), 0, LEVEL_MAX), day, plants };
@@ -2771,7 +2774,7 @@ function buildView(id) {
   const plants = snap.plants.map((p) => ({
     id: p.id, species: p.species, goal: p.goal, growth: p.growth,
     lastWatered: p.last, plantedDay: p.planted, resumeDay: p.resume, days: p.days.slice(),
-    paused: p.paused ? snap.day : null, nb: true, foto: p.foto || null
+    paused: p.paused ? snap.day : null, nb: true, foto: p.foto || null, name: p.name || null
   }));
   return { id, name: (c && c.name) || (ent && ent.name) || 'Nachbargarten', level: snap.level, plants, at: c ? c.at : null, loaded: !!c };
 }
@@ -2793,7 +2796,8 @@ function agoText(iso) {
   const d = Math.floor(h / 24);
   return `zuletzt aktiv vor ${d} ${d === 1 ? 'Tag' : 'Tagen'}`;
 }
-function plantInfo(p) { return `${SPECIES[p.species].name} · ${stageName(p.species, stageOf(p.growth))}${p.paused != null ? ' · Pause' : ''}`; }
+const fremdName = (p) => p.name || SPECIES[p.species].name; // Nachbar-Pflanze: Gewohnheit, falls geteilt
+function plantInfo(p) { return `${p.name ? p.name + ' · ' : ''}${SPECIES[p.species].name} · ${stageName(p.species, stageOf(p.growth))}${p.paused != null ? ' · Pause' : ''}`; }
 
 /* ---------- Gartenzaun-Ansicht: eigener Garten + Nachbarn ---------- */
 let viewIdx = 0;
@@ -2966,13 +2970,23 @@ function openNeighborhood() {
     nameBtn.addEventListener('click', () => askName(() => openNeighborhood()));
     const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Schließen');
     zu.addEventListener('click', closeSheet);
+    const teilt = !!state.privat.namenTeilen;
+    const namenBtn = el('button', { class: 'knopf' + (teilt ? ' an' : ''), type: 'button', 'aria-pressed': String(teilt) },
+      teilt ? '👁 Nachbarn sehen deine Gewohnheiten' : '🙈 Gewohnheiten zeigen?');
+    namenBtn.addEventListener('click', () => {
+      state.privat.namenTeilen = !teilt;
+      saveState();
+      scheduleSync(true);
+      toast(teilt ? 'Deine Nachbarn sehen jetzt nur noch die Pflanzenarten.' : 'Deine Nachbarn sehen jetzt, welche Gewohnheit zu welcher Pflanze gehört.');
+      openNeighborhood();
+    });
     const widgetBtn = el('button', { class: 'knopf', type: 'button' }, '📱 Widget einrichten');
     widgetBtn.addEventListener('click', () => widgetEinrichten());
     const pasteBtn = el('button', { class: 'knopf', type: 'button' }, '🔗 Link einfügen');
     pasteBtn.addEventListener('click', () => openInviteEinfuegen());
-    const hinweis = nb.list.length ? '' : el('p', { class: 'stimmung leise' }, 'Lade Freunde ein: Ihr seht dann gegenseitig, wie eure Gärten wachsen. Nur ansehen – gießen kann jeder nur seinen eigenen. Die Namen deiner Gewohnheiten bleiben auf deinem Gerät.');
+    const hinweis = nb.list.length ? '' : el('p', { class: 'stimmung leise' }, 'Lade Freunde ein: Ihr seht dann gegenseitig, wie eure Gärten wachsen. Nur ansehen – gießen kann jeder nur seinen eigenen. Die Namen deiner Gewohnheiten siehst nur du – außer du schaltest „Gewohnheiten zeigen“ ein.');
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Nachbarschaft', 3)), liste, hinweis,
-      el('div', { class: 'reihe' }, einladen), el('div', { class: 'reihe' }, widgetBtn, pasteBtn), kontoBereich(), el('div', { class: 'reihe' }, nameBtn, zu),
+      el('div', { class: 'reihe' }, einladen), el('div', { class: 'reihe' }, namenBtn), el('div', { class: 'reihe' }, widgetBtn, pasteBtn), kontoBereich(), el('div', { class: 'reihe' }, nameBtn, zu),
       MOCK ? el('p', { class: 'stimmung leise' }, `Testmodus (Mock, Profil „${MOCK_PROFILE}“) – kein echtes Supabase.`) : '');
   });
   blatt.scrollTop = keep;
@@ -3009,7 +3023,7 @@ function askName(then) {
     ab.addEventListener('click', closeSheet);
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') ok.click(); });
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Dein Garten', 3)),
-      el('p', { class: 'stimmung' }, 'Wie soll dein Garten bei deinen Nachbarn heißen? Geteilt werden nur Pflanzenarten und wie es ihnen geht – nie die Namen deiner Gewohnheiten.'),
+      el('p', { class: 'stimmung' }, 'Wie soll dein Garten bei deinen Nachbarn heißen? Geteilt werden Pflanzenarten und wie es ihnen geht. Die Namen deiner Gewohnheiten nur, wenn du es einschaltest.'),
       inp, el('div', { class: 'reihe' }, ab, ok));
     if (!matchMedia('(pointer: coarse)').matches) setTimeout(() => inp.focus(), 60);
   });
@@ -3927,7 +3941,7 @@ function openFoto(p) {
     wrap = el('div', { class: 'polaroid-rahmen lädt' }, img);
     const fig = el('figure', { class: 'polaroid' }, wrap, el('figcaption', null, pixelText(dateText(f.d), 3, true)));
     fig.style.setProperty('--dreh', (((hashStr(p.id + ':' + f.d) % 9) - 4) * 0.6).toFixed(1) + 'deg');
-    const cap = el('p', { class: 'polaroid-text' }, `${SPECIES[p.species].name} · ${dayAgo(f.d)}`);
+    const cap = el('p', { class: 'polaroid-text' }, `${p.nb ? fremdName(p) : nameOf(p)} · ${dayAgo(f.d)}`);
     const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Schließen');
     zu.addEventListener('click', closeSheet);
     const area = el('div', { class: 'reihe' });
