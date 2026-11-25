@@ -19,7 +19,7 @@
 'use strict';
 (function () {
 
-const VERSION = '1.5.1';
+const VERSION = '1.5.2';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -3798,7 +3798,15 @@ function init() {
   });
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+    addEventListener('load', () => navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {}));
+    // Neue Version installiert -> einmal neu laden, damit sie sofort da ist (nicht erst beim nächsten Öffnen)
+    const hatteSW = !!navigator.serviceWorker.controller;
+    let neuGeladen = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hatteSW || neuGeladen) return;
+      neuGeladen = true;
+      location.reload();
+    });
   }
 }
 

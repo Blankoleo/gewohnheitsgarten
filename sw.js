@@ -1,6 +1,6 @@
 /* Gewohnheits-Garten – Service Worker.
    Bei jeder Änderung an den Dateien den Cache-Namen erhöhen (garten-v4, …). */
-const CACHE = 'garten-v8';
+const CACHE = 'garten-v9';
 const FILES = [
   './',
   './index.html',
@@ -43,7 +43,8 @@ self.addEventListener('fetch', (e) => {
     const timer = setTimeout(() => {
       fromCache().then((m) => { if (m && !done) { done = true; resolve(m); } });
     }, 2500);
-    fetch(req).then((res) => {
+    // no-cache: am Server nachfragen (ETag) statt bis zu 10 Min. alten HTTP-Cache zu nehmen
+    fetch(req, { cache: 'no-cache' }).then((res) => {
       if (res && res.ok && !url.search) {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(req, copy));
