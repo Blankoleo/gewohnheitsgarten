@@ -1,4 +1,4 @@
--- Gewohnheits-Garten 1.6 „Konto“ – Supabase-Ergänzung
+-- Gewohnheits-Garten 1.6 „Konto“ – Supabase-Ergänzung (seit 2.0 danach gemeinde.sql ausführen)
 -- Ein simples Konto aus Name + Passwort (ohne E-Mail), damit der Garten auf allen Geräten derselbe ist.
 -- In Supabase → SQL Editor → „New query“ komplett einfügen und „Run“ drücken.
 -- Kann gefahrlos mehrmals ausgeführt werden. Ändert nichts an gardens/photos.
@@ -73,36 +73,8 @@ end;
 $$;
 revoke all on function public._acct_check_state(jsonb) from public, anon, authenticated;
 
--- Anlegen: Name frei? Passwort min. 6 Zeichen. Gibt die Revision (1) zurück.
--- Name vergeben -> Fehler mit errcode 'GG001'.
-create or replace function public.account_register(p_user text, p_pw text, p_state jsonb)
-returns jsonb
-language plpgsql
-security definer
-set search_path = public, extensions, pg_temp
-as $$
-declare
-  v_user text := public._acct_name(p_user);
-  v_tok  text;
-begin
-  if v_user !~ '^[a-z0-9_.äöüß-]{3,24}$' then
-    raise exception 'name ungueltig' using errcode = '22023';
-  end if;
-  if p_pw is null or char_length(p_pw) < 6 or char_length(p_pw) > 72 then
-    raise exception 'passwort zu kurz' using errcode = '22023';
-  end if;
-  perform public._acct_check_state(p_state);
-  v_tok := public._acct_token(p_state);
-  begin
-    insert into public.accounts (username, pw_hash, token_hash, state, state_rev)
-    values (v_user, extensions.crypt(p_pw, extensions.gen_salt('bf', 8)),
-            encode(sha256(convert_to(v_tok, 'UTF8')), 'hex'), p_state, 1);
-  exception when unique_violation then
-    raise exception 'name vergeben' using errcode = 'GG001';
-  end;
-  return jsonb_build_object('ok', true, 'user', v_user, 'rev', 1);
-end;
-$$;
+-- Anlegen (account_register): seit 2.0 in gemeinde.sql – nur noch mit Gemeinde-Code.
+-- Die alte Variante ohne Code wird hier bewusst nicht mehr angelegt (und in gemeinde.sql gelöscht).
 
 -- Anmelden: {ok:true, user, rev, state} oder {ok:false, error:'falsch'|'gesperrt', wait:Sekunden}
 create or replace function public.account_login(p_user text, p_pw text)
@@ -225,13 +197,11 @@ begin
 end;
 $$;
 
--- Rechte: nur die fünf öffentlichen Funktionen, nur für anon/authenticated
-revoke all on function public.account_register(text, text, jsonb) from public, anon, authenticated;
+-- Rechte: nur die vier öffentlichen Funktionen (account_register: gemeinde.sql), nur für anon/authenticated
 revoke all on function public.account_login(text, text) from public, anon, authenticated;
 revoke all on function public.account_save(text, text, jsonb, bigint) from public, anon, authenticated;
 revoke all on function public.account_pull(text, text, bigint) from public, anon, authenticated;
 revoke all on function public.account_change_pw(text, text, text) from public, anon, authenticated;
-grant execute on function public.account_register(text, text, jsonb) to anon, authenticated;
 grant execute on function public.account_login(text, text) to anon, authenticated;
 grant execute on function public.account_save(text, text, jsonb, bigint) to anon, authenticated;
 grant execute on function public.account_pull(text, text, bigint) to anon, authenticated;
