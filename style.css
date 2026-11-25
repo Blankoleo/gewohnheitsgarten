@@ -631,3 +631,8 @@ body.nachbar-ansicht #neu { display: none; }
 }
 .polaroid figcaption { margin-top: 10px; line-height: 0; }
 .polaroid-text { margin: 10px 0 0; font-size: 14px; color: var(--creme-d); }
+
+/* 1.5 Widget-Anleitung */
+.widget-schritte { margin: 8px 0 0; padding-left: 20px; font-size: 14px; line-height: 1.45; }
+.widget-schritte li + li { margin-top: 4px; }
+a.knopf { text-decoration: none; text-align: center; display: inline-flex; align-items: center; justify-content: center; }

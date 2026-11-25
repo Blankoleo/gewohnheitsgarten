@@ -1,4 +1,4 @@
-/* Gewohnheits-Garten 1.4 „Blumenbeet“
+/* Gewohnheits-Garten 1.5 „Widget“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage.
@@ -19,7 +19,7 @@
 'use strict';
 (function () {
 
-const VERSION = '1.4.1';
+const VERSION = '1.5';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -2964,9 +2964,11 @@ function openNeighborhood() {
     nameBtn.addEventListener('click', () => askName(() => openNeighborhood()));
     const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Schließen');
     zu.addEventListener('click', closeSheet);
+    const widgetBtn = el('button', { class: 'knopf', type: 'button' }, '📱 Widget einrichten');
+    widgetBtn.addEventListener('click', () => widgetEinrichten());
     const hinweis = nb.list.length ? '' : el('p', { class: 'stimmung leise' }, 'Lade Freunde ein: Ihr seht dann gegenseitig, wie eure Gärten wachsen. Nur ansehen – gießen kann jeder nur seinen eigenen. Die Namen deiner Gewohnheiten bleiben auf deinem Gerät.');
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Nachbarschaft', 3)), liste, hinweis,
-      el('div', { class: 'reihe' }, einladen), el('div', { class: 'reihe' }, nameBtn, zu),
+      el('div', { class: 'reihe' }, einladen), el('div', { class: 'reihe' }, widgetBtn), el('div', { class: 'reihe' }, nameBtn, zu),
       MOCK ? el('p', { class: 'stimmung leise' }, `Testmodus (Mock, Profil „${MOCK_PROFILE}“) – kein echtes Supabase.`) : '');
   });
   blatt.scrollTop = keep;
@@ -3034,6 +3036,46 @@ async function invite() {
     zu.addEventListener('click', closeSheet);
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Einladung', 3)), el('p', { class: 'stimmung' }, 'Kopiere diesen Link und schick ihn deinen Freunden:'), inp, el('div', { class: 'reihe' }, zu));
     setTimeout(() => { inp.focus(); inp.select(); }, 60);
+  });
+}
+
+/* ---------- Widget (App „Scriptable“): Skript samt Garten-Code kopieren ----------
+   Der Code enthält die Garten-ID und die Namen der Gewohnheiten – er landet nur in der
+   Zwischenablage und dann im Skript auf dem eigenen iPhone, nie auf dem Server. */
+function widgetCode() {
+  const n = {};
+  state.garden.plants.forEach((p) => { n[p.id] = nameOf(p).slice(0, 40); });
+  const ascii = JSON.stringify({ id: state.garden.id, n }).replace(/[\u007f-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+  return 'GARTEN1:' + btoa(ascii);
+}
+async function widgetEinrichten() {
+  if (!NB_ON) { toast('Das Widget braucht die Nachbarschaft – sie ist bald verfügbar.'); return; }
+  if (!nbData().name) { askName(() => widgetEinrichten()); return; }
+  ensureIdentity();
+  syncNow(true); // damit das Widget gleich den aktuellen Stand findet
+  const skript = fetch('./widget/gewohnheitsgarten-widget.js').then((r) => { if (!r.ok) throw new Error('http'); return r.text(); })
+    .then((t) => `// Gewohnheits-Garten · dein Garten-Code (privat, nicht weitergeben)\nconst GARTEN_CODE = '${widgetCode()}';\n\n${t}`);
+  let ok = false;
+  try { // Safari: ClipboardItem mit Promise, sonst geht der Tipp durch das Laden verloren
+    await navigator.clipboard.write([new ClipboardItem({ 'text/plain': skript.then((t) => new Blob([t], { type: 'text/plain' })) })]);
+    ok = true;
+  } catch (e) {
+    try { await navigator.clipboard.writeText(await skript); ok = true; } catch (e2) { /* unten zeigen */ }
+  }
+  openSheet((b) => {
+    b.setAttribute('aria-label', 'Widget einrichten');
+    const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Fertig');
+    zu.addEventListener('click', closeSheet);
+    const app = el('a', { class: 'knopf', href: 'https://apps.apple.com/app/scriptable/id1405459188', target: '_blank', rel: 'noopener' }, 'Scriptable laden');
+    const schritte = el('ol', { class: 'widget-schritte' },
+      el('li', null, 'Gratis-App „Scriptable“ installieren.'),
+      el('li', null, 'Dort „+“ tippen, einfügen, oben „Garten“ nennen, Fertig.'),
+      el('li', null, 'Home-Bildschirm lange drücken → „+“ → Scriptable → Widget. Widget antippen → Script: Garten.'));
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Widget', 3)),
+      el('p', { class: 'stimmung' }, ok ? 'Das Widget-Skript ist kopiert. 📋' : 'Kopieren hat nicht geklappt – versuch es bitte nochmal.'),
+      schritte,
+      el('p', { class: 'stimmung leise' }, 'Das Widget zeigt, wer Wasser braucht. Antippen öffnet den Garten – gegossen wird erst mit Foto. Neue Pflanzen? Einfach nochmal einrichten.'),
+      el('div', { class: 'reihe' }, app, zu));
   });
 }
 
@@ -3138,7 +3180,7 @@ function setupNeighborhood() {
   $('szene').append(pfeilL, pfeilR);
   $('titel').after(punkte);
   const knopf = $('nachbarn');
-  if (!NB_ON) { knopf.hidden = true; handleInviteParam(); return; }
+  if (!NB_ON) { knopf.hidden = true; handleInviteParam(); handleGiessParam(); return; }
   knopf.hidden = false;
   knopf.append(houseIcon());
   knopf.addEventListener('click', openNeighborhood);
@@ -3154,6 +3196,7 @@ function setupNeighborhood() {
   scheduleSync();                    // beim Start (nur bei Änderung)
   if (nbData().list.length) pollNow(true); // einmal frische Stände für die Punkte-Leiste
   handleInviteParam();
+  handleGiessParam();
 }
 function houseIcon() {
   const c = document.createElement('canvas'); c.width = 13; c.height = 11;
@@ -3368,7 +3411,43 @@ fotoInput.addEventListener('change', () => {
   const f = fotoInput.files && fotoInput.files[0], pid = fotoTarget;
   fotoInput.value = '';
   if (f && pid) lastTake = takeFoto(f, pid);
+  else fotoDannGiessen = null;
 });
+fotoInput.addEventListener('cancel', () => { fotoDannGiessen = null; });
+
+/* ---------- 1.5 Widget: ?giessen=<Pflanzen-ID> – nie direkt gießen, immer erst ein Foto ---------- */
+let fotoDannGiessen = null;
+function handleGiessParam() {
+  const raw = params.get('giessen');
+  if (raw == null) return;
+  const u = new URL(location.href);
+  u.searchParams.delete('giessen');
+  history.replaceState(null, '', u.toString());
+  const p = state.garden.plants.find((x) => x.id === String(raw).trim());
+  if (!p) { toastLater('Diese Pflanze gibt es nicht mehr. Richte das Widget neu ein.'); return; }
+  const t = today();
+  if (wateredToday(p, t)) { toastLater(`${nameOf(p)} ist heute schon gegossen.`); return; }
+  if (p.paused != null) { toastLater(`${nameOf(p)} macht gerade Pause.`); return; }
+  openSheet((b) => {
+    b.setAttribute('aria-label', 'Gießen mit Foto');
+    const kamera = el('button', { class: 'knopf haupt', type: 'button' }, '📸 Foto machen');
+    const galerie = el('button', { class: 'knopf', type: 'button' }, 'Aus Fotos');
+    const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Später');
+    const los = (gallery) => {
+      if (kamera.dataset.done) return; kamera.dataset.done = '1';
+      closeSheet();
+      fotoDannGiessen = p.id;
+      fotoStart(p, gallery); // im selben Tipp, sonst blockiert Safari die Kamera
+    };
+    kamera.addEventListener('click', () => los(false));
+    galerie.addEventListener('click', () => los(true));
+    ab.addEventListener('click', closeSheet);
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Gießen', 3)),
+      el('p', { class: 'stimmung gross' }, '📸'),
+      el('p', { class: 'stimmung' }, `${nameOf(p)} bekommt Wasser, sobald du ein kleines Foto als Nachweis gemacht hast.`),
+      el('div', { class: 'reihe' }, kamera), el('div', { class: 'reihe' }, ab, galerie));
+  });
+}
 
 /** Kamera (oder Galerie) öffnen – beim allerersten geteilten Foto vorher kurz der Datenschutz-Hinweis. */
 function fotoStart(p, gallery) {
@@ -3391,7 +3470,7 @@ function fotoStart(p, gallery) {
         closeSheet();
         go(); // noch im selben Tipp, sonst blockiert der Browser die Kamera
       });
-      ab.addEventListener('click', closeSheet);
+      ab.addEventListener('click', () => { fotoDannGiessen = null; closeSheet(); });
       b.append(el('div', { class: 'blatt-kopf' }, pixelText('Foto', 3)),
         el('p', { class: 'stimmung gross' }, '📸'),
         el('p', { class: 'stimmung' }, 'Deine Nachbarn sehen dieses Foto. Es wird nach 7 Tagen automatisch gelöscht.'),
@@ -3418,11 +3497,18 @@ async function takeFoto(file, pid) {
     if (Array.isArray(nb.fotoDel)) nb.fotoDel = nb.fotoDel.filter((x) => x !== pid);
     renderLabels();
     if (sharing()) syncFotos();
+    if (fotoDannGiessen === pid) { // Widget-Ablauf: erst Foto, dann gießen
+      fotoDannGiessen = null;
+      giessen(p);
+      return lastFotoInfo;
+    }
     toast(meta.local ? 'Foto gespeichert. Es bleibt auf deinem Gerät.' : 'Foto hängt jetzt an der Pflanze.');
     openFoto(p);
     return lastFotoInfo;
   } catch (e) {
-    toast('Das Foto hat leider nicht geklappt.');
+    const warGiessen = fotoDannGiessen === pid;
+    if (warGiessen) fotoDannGiessen = null;
+    toast(warGiessen ? 'Das Foto hat leider nicht geklappt. Gegossen wird erst mit Foto.' : 'Das Foto hat leider nicht geklappt.');
     return null;
   } finally { fotoBusy = false; }
 }
