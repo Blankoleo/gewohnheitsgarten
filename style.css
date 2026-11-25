@@ -281,7 +281,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 .wackel { animation: wackel .35s; }
 @keyframes wackel { 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
 
-.arten { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 14px 0 16px; }
+.arten { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 14px 0 16px; }
 .art {
   border: 2px solid transparent;
   background: #352b52;

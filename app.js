@@ -1,4 +1,4 @@
-/* Gewohnheits-Garten 1.3 „Foto-Nachweis“
+/* Gewohnheits-Garten 1.4 „Blumenbeet“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage.
@@ -19,7 +19,7 @@
 'use strict';
 (function () {
 
-const VERSION = '1.3';
+const VERSION = '1.4';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -172,9 +172,12 @@ const SPECIES = {
   sonnenblume: { name: 'Sonnenblume', goal: 3, durst: 'mäßig durstig', stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Volle Blüte'], seed: [96, 84, 76],    accent: [246, 196, 88] },
   kaktus:      { name: 'Kaktus',      goal: 1, durst: 'genügsam', stages: ['Samen', 'Keim', 'Säule', 'Blüte', 'Voll'],        seed: [70, 58, 54],    accent: [236, 140, 170] },
   kirschbaum:  { name: 'Kirschbaum',  goal: 3, durst: 'mäßig durstig', stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Baum'],        seed: [160, 86, 74],   accent: [246, 176, 196] },
-  monstera:    { name: 'Monstera',    goal: 7, durst: 'durstig',  stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Voll'],        seed: [176, 144, 104], accent: [96, 160, 120] }
+  monstera:    { name: 'Monstera',    goal: 7, durst: 'durstig',  stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Voll'],        seed: [176, 144, 104], accent: [96, 160, 120] },
+  mohn:        { name: 'Mohn',        goal: 3, durst: 'mäßig durstig', stages: ['Samen', 'Keim', 'Rosette', 'Blüte', 'Volle Blüte'], seed: [64, 60, 72],  accent: [228, 64, 60] },
+  kornblume:   { name: 'Kornblume',   goal: 5, durst: 'durstig',  stages: ['Samen', 'Keim', 'Busch', 'Blüte', 'Volle Blüte'], seed: [176, 160, 128], accent: [92, 132, 236] },
+  lavendel:    { name: 'Lavendel',    goal: 1, durst: 'genügsam', stages: ['Samen', 'Keim', 'Busch', 'Ähren', 'Volle Blüte'], seed: [110, 84, 70],  accent: [156, 120, 214] }
 };
-const SPECIES_ORDER = ['farn', 'sonnenblume', 'kaktus', 'kirschbaum', 'monstera'];
+const SPECIES_ORDER = ['farn', 'sonnenblume', 'kaktus', 'kirschbaum', 'monstera', 'mohn', 'kornblume', 'lavendel'];
 const EXTRA_STAGES = ['Prächtig', 'Riesig', 'Legendär'];
 // Wachstumspunkte bis zur Stufe. 1 Punkt ≈ 1 Tag täglicher Pflege, also ~7 pro Woche bei jedem Rhythmus.
 // Prächtig nach ~5, Riesig nach ~9, Legendär nach ~16 Wochen Dranbleiben.
@@ -652,6 +655,162 @@ const DRAW = {
     if (ex >= 3) { // Luftwurzeln und goldene Panaschierung
       if (w < 0.6) sprinkle(b, 18, [[236, 230, 170], [255, 226, 140]], 57, false);
     }
+  },
+
+  mohn(b, st, d, w, ex) {
+    const G = wiltC([120, 170, 112], w), D = wiltC([82, 128, 94], w), Gl = wiltC([160, 200, 140], w);
+    const R1 = wiltC([230, 66, 60], w, 'flower'), R2 = wiltC([184, 38, 54], w, 'flower'), R3 = wiltC([252, 134, 112], w, 'flower');
+    const K = wiltC([48, 36, 50], w, 'flower'), Kc = wiltC([150, 176, 120], w);
+    // Rosette aus gelappten (gefiederten) Blättern am Boden
+    const rosette = (n, len) => {
+      for (let i = 0; i < n; i++) {
+        const t = n === 1 ? 0.5 : i / (n - 1);
+        const a = -Math.PI + 0.3 + t * (Math.PI - 0.6);
+        const sg = Math.cos(a) >= 0 ? 1 : -1;
+        const l = len * (0.75 + 0.25 * Math.sin(t * Math.PI));
+        b.part(); leaf(b, CX + sg, BY, a + d * 0.8 * sg, l, l * 0.3, i % 2 ? G : Gl, D, { slits: l >= 7 ? 2 : l >= 5 ? 1 : 0 });
+      }
+    };
+    if (st === 1) { rosette(3, 4.5); return; }
+    // Stiele: [Versatz x, Höhe, Blütenradius (0 = nickende Knospe)]
+    let F = [[[2, 13, 0]], [[3, 22, 3], [-4, 15, 0]], [[2, 30, 3.6], [-7, 24, 3.2], [8, 19, 3], [-3, 16, 0]]][st - 2].slice();
+    if (ex >= 1) F.push([-12, 28, 3.2], [12, 25, 3], [5, 14, 0]);
+    if (ex >= 2) F.push([-4, 37, 3.4], [15, 33, 3], [-14, 15, 0]);
+    if (ex >= 3) F.push([-17, 21, 2.8], [6, 42, 3.8], [17, 18, 0]);
+    const heads = [];
+    F.forEach(([ox, h, R], i) => {
+      const sg = ox >= 0 ? 1 : -1;
+      const tx0 = CX + ox + d * 6 * sg, ty0 = BY - h + d * h * 0.22;
+      const s = [CX + ox * 0.25, BY, CX + ox * 0.6 - d * sg, BY - h * 0.55, tx0, ty0];
+      b.part(); curve(b, s, st >= 4 ? 1.3 : 1, 1, D);
+      if (i % 2 === 0 && h > 18) { const q = qp(s, 0.3); b.part(); leaf(b, q[0], q[1], sg > 0 ? -0.5 : -Math.PI + 0.5, 4.5, 1.4, G, D, { slits: 1 }); }
+      heads.push([tx0, ty0, R * (1 + ex * 0.07) * (1 - w * 0.15)]);
+    });
+    rosette([0, 0, 5, 6, 7][st] + ex, [0, 0, 6, 7, 8][st] + ex);
+    for (const [x, y, R] of heads) {
+      if (!R) { // nickende Knospe am gebogenen Stielende
+        b.part(); disc(b, x + 1, y + 1.5, 1.1, 1.5, G); b.put(x + 1, y + 3, R2); b.put(x, y + 1, Gl);
+        continue;
+      }
+      if (w > 0.6) { // verblüht: nur die Samenkapsel bleibt
+        b.part(); disc(b, x, y, R * 0.35, R * 0.45, Kc); seg(b, x - R * 0.35, y - R * 0.45, x + R * 0.35, y - R * 0.45, 1, K);
+        continue;
+      }
+      b.part(); // hintere Blütenblätter (dunkler), vordere (hell), schwarzes Herz
+      disc(b, x - R * 0.48, y - R * 0.22, R * 0.6, R * 0.55, R2);
+      disc(b, x + R * 0.48, y - R * 0.22, R * 0.6, R * 0.55, R2);
+      b.part();
+      disc(b, x - R * 0.42, y + R * 0.18, R * 0.58, R * 0.52, R1);
+      disc(b, x + R * 0.42, y + R * 0.18, R * 0.58, R * 0.52, R1);
+      disc(b, x, y + R * 0.34, R * 0.5, R * 0.42, R1);
+      disc(b, x - R * 0.55, y + R * 0.02, R * 0.24, R * 0.2, R3);
+      b.part(); disc(b, x, y - R * 0.12, Math.max(0.6, R * 0.24), Math.max(0.5, R * 0.18), K);
+      if (ex >= 3 && w < 0.6) b.put(x, y - R * 0.14, [255, 224, 130]);
+    }
+    if (ex >= 1 && w < 0.6) sprinkle(b, 4 + ex * 4, [[252, 150, 130], [246, 240, 214]], 23 + ex, false);
+    if (ex >= 3 && w < 0.6) sprinkle(b, 14, [[255, 226, 140], [250, 246, 190]], 91, true);
+  },
+
+  kornblume(b, st, d, w, ex) {
+    const G = wiltC([126, 166, 132], w), D = wiltC([84, 122, 104], w), Gl = wiltC([170, 198, 162], w); // graugrün
+    const B1 = wiltC([96, 136, 238], w, 'flower'), B2 = wiltC([62, 94, 206], w, 'flower'), B3 = wiltC([156, 190, 252], w, 'flower');
+    const V = wiltC([106, 66, 148], w, 'flower');
+    const narrow = (x, y, a, len) => { b.part(); leaf(b, x, y, a, len, Math.max(0.8, len * 0.15), G, D); };
+    if (st === 1) {
+      narrow(CX, BY, -Math.PI / 2 - 0.45 - d, 5); narrow(CX, BY, -Math.PI / 2 + 0.4 + d, 5.5);
+      return;
+    }
+    const head = (x, y, R) => {
+      if (w > 0.6) { b.part(); disc(b, x, y + 0.5, 1.1, 1.4, Gl); b.put(x, y - 1, V); return; } // verblüht
+      b.part();
+      const n = R >= 2.6 ? 9 : 8;
+      for (let k = 0; k < n; k++) { // trichterförmige, ausgefranste Randblüten
+        const a = k / n * Math.PI * 2 - Math.PI / 2 + 0.2;
+        leaf(b, x, y, a - 0.1, R + 0.7, R * 0.36, k % 2 ? B1 : B2, null);
+        leaf(b, x, y, a + 0.12, R + 0.4, R * 0.3, k % 2 ? B2 : B1, null);
+      }
+      b.part(); disc(b, x, y, R * 0.42, R * 0.38, B3); disc(b, x, y, Math.max(0.5, R * 0.22), Math.max(0.5, R * 0.2), V);
+      if (ex >= 3) b.put(x, y, [255, 224, 130]);
+    };
+    const bud = (x, y) => { b.part(); disc(b, x, y, 1.1, 1.5, Gl); b.put(x, y + 1, D); b.put(x, y - 1.5, B2); };
+    // Stiele: [x, Höhe, Kopfradius (0 = Knospe), Seitenast [t, dx, dy, Radius] oder null]
+    let S = [
+      [[1, 15, 0, null]],
+      [[1, 24, 2.4, null], [-4, 17, 0, null]],
+      [[1, 31, 2.8, [0.55, -8, -5, 2.2]], [6, 24, 2.5, [0.5, 6, -4, 0]], [-6, 20, 2.3, null]]
+    ][st - 2].slice();
+    if (ex >= 1) S.push([-12, 27, 2.5, [0.5, -6, -4, 0]], [11, 17, 2.2, null]);
+    if (ex >= 2) S.push([13, 31, 2.6, [0.55, 7, -5, 2.2]], [-2, 38, 2.7, [0.6, -6, -3, 0]]);
+    if (ex >= 3) S.push([-16, 19, 2.3, null], [4, 44, 3, [0.6, -7, -4, 2.4]], [17, 22, 2.3, null]);
+    const heads = [];
+    S.forEach(([ox, h, R, br], i) => {
+      const sg = ox >= 0 ? 1 : -1;
+      const tx0 = CX + ox + d * 6 * sg, ty0 = BY - h + d * h * 0.22;
+      const s = [CX + ox * 0.2, BY, CX + ox * 0.65 - d * sg, BY - h * 0.5, tx0, ty0];
+      b.part(); curve(b, s, 1, 1, D);
+      const q = qp(s, 0.32);
+      narrow(q[0], q[1], (sg > 0 ? -0.75 : -Math.PI + 0.75) + d * sg, 5);
+      if (h > 22) { const q2 = qp(s, 0.62); narrow(q2[0], q2[1], (sg > 0 ? -Math.PI + 0.9 : -0.9) - d * sg, 4); }
+      if (br) {
+        const [t, dx, dy, R2] = br, p = qp(s, t);
+        const bx = p[0] + dx + d * 3 * Math.sign(dx), by = p[1] + dy + d * 4;
+        b.part(); seg(b, p[0], p[1], bx, by, 1, D);
+        heads.push([bx, by, R2]);
+      }
+      heads.push([tx0, ty0, R]);
+    });
+    // grundständige schmale Blätter
+    const nb = [0, 0, 4, 5, 6][st] + ex;
+    for (let i = 0; i < nb; i++) { const t = i / (nb - 1); narrow(CX + (t - 0.5) * 3, BY, -Math.PI + 0.45 + t * (Math.PI - 0.9) + d * 0.7 * Math.sign(t - 0.5), 7 + ex); }
+    for (const [x, y, R] of heads) R ? head(x, y, R * (1 + ex * 0.06) * (1 - w * 0.15)) : bud(x, y);
+    if (ex >= 1 && w < 0.6) sprinkle(b, 4 + ex * 4, [[156, 190, 252], [246, 240, 214]], 37 + ex, false);
+    if (ex >= 3 && w < 0.6) sprinkle(b, 14, [[255, 226, 140], [250, 246, 190]], 113, true);
+  },
+
+  lavendel(b, st, d, w, ex) {
+    const G = wiltC([134, 166, 140], w), D = wiltC([92, 124, 112], w), Gl = wiltC([178, 200, 172], w); // silbriges Graugrün
+    const L1 = wiltC([160, 122, 216], w, 'flower'), L2 = wiltC([118, 84, 184], w, 'flower'), L3 = wiltC([200, 174, 238], w, 'flower');
+    const T = wiltC([126, 102, 84], w, 'wood');
+    const rnd = mulberry32(53 + st * 7 + ex);
+    const tuft = (n, len, spread) => { // Busch aus schmalen, aufrechten Blättchen
+      for (let i = 0; i < n; i++) {
+        const t = n === 1 ? 0.5 : i / (n - 1);
+        const a = -Math.PI / 2 + (t - 0.5) * 2 * spread;
+        const sg = Math.sign(t - 0.5);
+        const l = len * (0.7 + 0.3 * Math.cos((t - 0.5) * Math.PI)) * (0.85 + rnd() * 0.3);
+        b.part(); leaf(b, CX + (t - 0.5) * 4, BY, a + d * 0.9 * sg, l, Math.max(0.8, l * 0.13), mix(G, Gl, rnd()), D);
+      }
+    };
+    if (st === 1) { tuft(3, 5, 0.6); return; }
+    // Blütenstiele mit Ähren aus Quirlen
+    const n = [0, 0, 3, 5, 8][st] + ex * 3;
+    const H = [0, 0, 15, 22, 28][st] + ex * 3, spread = 0.55 + ex * 0.07;
+    const spikeLen = [0, 0, 3, 6, 8][st] + ex;
+    const order = [];
+    for (let i = 0; i < n; i++) order.push(i);
+    order.sort((a1, a2) => Math.abs(a2 - (n - 1) / 2) - Math.abs(a1 - (n - 1) / 2)); // außen zuerst, Mitte vorn
+    for (const i of order) {
+      const t = n === 1 ? 0.5 : i / (n - 1);
+      const sg = Math.sign(t - 0.5) || 1;
+      const a = -Math.PI / 2 + (t - 0.5) * 2 * spread;
+      const h = H * (1 - 0.22 * Math.abs(t - 0.5) * 2) * (0.88 + rnd() * 0.24);
+      const x0 = CX + (t - 0.5) * 7, y0 = BY - 2;
+      const ex1 = x0 + Math.cos(a) * h + d * h * 0.2 * sg, ey1 = y0 + Math.sin(a) * h + d * h * 0.32;
+      const s = [x0, y0, x0 + Math.cos(a) * h * 0.55, y0 + Math.sin(a) * h * 0.55, ex1, ey1];
+      b.part(); curve(b, s, 1, 1, D);
+      b.part();
+      const m = Math.max(2, Math.round(spikeLen / 1.3));
+      for (let k = 0; k < m; k++) {
+        if (k >= m * 0.6 && k % 3 === 2) continue; // unten lockere Quirle mit Lücken
+        const q = qp(s, 1 - (k / m) * (spikeLen / h));
+        const col = st === 2 ? (k % 2 ? G : Gl) : k === 0 ? L3 : k % 2 ? L2 : L1;
+        disc(b, q[0], q[1], k === 0 ? 0.4 : 0.6, 0.7, col);
+      }
+    }
+    if (st >= 3) { b.part(); seg(b, CX - 1, BY, CX - 1, BY - 3, 2, T); }
+    tuft([0, 0, 8, 12, 15][st] + ex * 3, [0, 0, 8, 10.5, 12.5][st] + ex * 1.5, 1.05 + ex * 0.08);
+    if (ex >= 1 && w < 0.6) sprinkle(b, 5 + ex * 5, [[200, 174, 238], [246, 240, 214]], 61 + ex, false);
+    if (ex >= 3 && w < 0.6) sprinkle(b, 14, [[255, 226, 140], [250, 246, 190]], 149, true);
   }
 };
 
