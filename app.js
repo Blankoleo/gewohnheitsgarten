@@ -19,7 +19,7 @@
 'use strict';
 (function () {
 
-const VERSION = '1.5';
+const VERSION = '1.5.1';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -2030,7 +2030,6 @@ function onWatered(k) {
   else { renderLand(); updateUI(); }
   if (k.msg) toast(k.msg);
   if (res.levelUp) celebrate(res.levelUp);
-  if (!view) showNachweis(p);
 }
 function celebrate(L) {
   const d = DEKO.find((x) => x.lv === L);
@@ -2066,7 +2065,6 @@ function giessen(p) {
     if (res.levelUp || res.grew) refresh(); else { renderLand(); updateUI(); }
     toast(msg);
     if (res.levelUp) celebrate(res.levelUp);
-    showNachweis(p);
   }
 }
 
@@ -2312,7 +2310,7 @@ function openPlant(p) {
       el('p', { class: 'stimmung' }, moodText(p, st, cond, wt)));
     const g = el('button', { class: 'knopf haupt', type: 'button' }, wt ? 'Heute gegossen' : 'Gießen');
     g.disabled = wt;
-    g.addEventListener('click', () => { closeSheet(); setTimeout(() => giessen(p), 220); });
+    g.addEventListener('click', () => { closeSheet(); setTimeout(() => giessMitFoto(p), 360); });
     const area = el('div', { class: 'reihe' });
     const showButtons = () => {
       const ren = el('button', { class: 'knopf', type: 'button' }, 'Umbenennen');
@@ -2440,7 +2438,7 @@ canvas.addEventListener('click', (e) => {
   if (view) { toast(plantInfo(s.p)); return; } // Nachbargarten: nur ansehen, nie gießen
   if (cans.some((k) => k.s.p.id === s.p.id)) return;
   if (wateredToday(s.p) || s.p.paused != null) openPlant(s.p);
-  else giessen(s.p);
+  else giessMitFoto(s.p); // 1.5.1: gegossen wird immer erst mit Foto
 });
 canvas.addEventListener('mousemove', (e) => { canvas.classList.toggle('zeiger', !!plantAt(e)); });
 
@@ -3415,7 +3413,7 @@ fotoInput.addEventListener('change', () => {
 });
 fotoInput.addEventListener('cancel', () => { fotoDannGiessen = null; });
 
-/* ---------- 1.5 Widget: ?giessen=<Pflanzen-ID> – nie direkt gießen, immer erst ein Foto ---------- */
+/* ---------- 1.5 Widget: ?giessen=<Pflanzen-ID>; seit 1.5.1 wird überall nur mit Foto gegossen ---------- */
 let fotoDannGiessen = null;
 function handleGiessParam() {
   const raw = params.get('giessen');
@@ -3428,6 +3426,11 @@ function handleGiessParam() {
   const t = today();
   if (wateredToday(p, t)) { toastLater(`${nameOf(p)} ist heute schon gegossen.`); return; }
   if (p.paused != null) { toastLater(`${nameOf(p)} macht gerade Pause.`); return; }
+  giessMitFoto(p);
+}
+/** Gießen geht nur mit Foto-Nachweis (Kamera oder Fotos). Ohne Foto bleibt die Pflanze ungegossen. */
+function giessMitFoto(p) {
+  if (view || wateredToday(p) || p.paused != null) return;
   openSheet((b) => {
     b.setAttribute('aria-label', 'Gießen mit Foto');
     const kamera = el('button', { class: 'knopf haupt', type: 'button' }, '📸 Foto machen');
