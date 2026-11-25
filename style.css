@@ -636,3 +636,11 @@ body.nachbar-ansicht #neu { display: none; }
 .widget-schritte { margin: 8px 0 0; padding-left: 20px; font-size: 14px; line-height: 1.45; }
 .widget-schritte li + li { margin-top: 4px; }
 a.knopf { text-decoration: none; text-align: center; display: inline-flex; align-items: center; justify-content: center; }
+
+/* ---------- Konto (1.6) ---------- */
+.konto-box { margin-top: 14px; background: #2c2445; border: 2px solid var(--rand); border-radius: 12px; padding: 10px 12px 12px; }
+.konto-titel { margin: 0 0 4px; font-size: 14px; font-weight: 600; color: var(--teal); }
+.konto-box .frage { margin-top: 2px; }
+.konto-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.konto-form .reihe { margin-top: 2px; }
+.konto-fehler { margin: 0; min-height: 1.2em; font-size: 13px; color: #f2a7a0; }

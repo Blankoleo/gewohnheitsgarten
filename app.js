@@ -1,4 +1,4 @@
-/* Gewohnheits-Garten 1.5 „Widget“
+/* Gewohnheits-Garten 1.6 „Konto“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage.
@@ -19,7 +19,7 @@
 'use strict';
 (function () {
 
-const VERSION = '1.5.2';
+const VERSION = '1.6';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -134,7 +134,7 @@ function saveState() {
   state.garden.deko = DEKO.filter((d) => d.lv <= L).map((d) => d.id);
   try { localStorage.setItem(STORE, JSON.stringify(state)); }
   catch (e) { toast('Speichern hat leider nicht geklappt.'); }
-  scheduleSync();
+  scheduleSync();  scheduleKonto();
 }
 const nameOf = (p) => state.privat.names[p.id] || 'Pflanze';
 
@@ -2566,7 +2566,11 @@ async function sbRpc(fn, body) {
   if (/^eyJ/.test(SB_KEY)) headers.Authorization = 'Bearer ' + SB_KEY; // alter anon-JWT; neue sb_publishable-Schlüssel nur als apikey
   try {
     const res = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, { method: 'POST', headers, body: JSON.stringify(body), signal: ctl.signal, cache: 'no-store' });
-    if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+    if (!res.ok) {
+      const e = new Error('HTTP ' + res.status); e.status = res.status;
+      try { e.code = (JSON.parse(await res.text()) || {}).code; } catch (x) { /* kein JSON */ }
+      throw e;
+    }
     const txt = await res.text();
     return txt ? JSON.parse(txt) : null;
   } finally { clearTimeout(timer); }
@@ -2964,9 +2968,11 @@ function openNeighborhood() {
     zu.addEventListener('click', closeSheet);
     const widgetBtn = el('button', { class: 'knopf', type: 'button' }, '📱 Widget einrichten');
     widgetBtn.addEventListener('click', () => widgetEinrichten());
+    const pasteBtn = el('button', { class: 'knopf', type: 'button' }, '🔗 Link einfügen');
+    pasteBtn.addEventListener('click', () => openInviteEinfuegen());
     const hinweis = nb.list.length ? '' : el('p', { class: 'stimmung leise' }, 'Lade Freunde ein: Ihr seht dann gegenseitig, wie eure Gärten wachsen. Nur ansehen – gießen kann jeder nur seinen eigenen. Die Namen deiner Gewohnheiten bleiben auf deinem Gerät.');
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Nachbarschaft', 3)), liste, hinweis,
-      el('div', { class: 'reihe' }, einladen), el('div', { class: 'reihe' }, widgetBtn), el('div', { class: 'reihe' }, nameBtn, zu),
+      el('div', { class: 'reihe' }, einladen), el('div', { class: 'reihe' }, widgetBtn, pasteBtn), kontoBereich(), el('div', { class: 'reihe' }, nameBtn, zu),
       MOCK ? el('p', { class: 'stimmung leise' }, `Testmodus (Mock, Profil „${MOCK_PROFILE}“) – kein echtes Supabase.`) : '');
   });
   blatt.scrollTop = keep;
@@ -3084,6 +3090,10 @@ async function handleInviteParam() {
   const u = new URL(location.href);
   u.searchParams.delete('nachbar');
   history.replaceState(null, '', u.toString());
+  addNeighborById(raw);
+}
+/** Nachbarn per Garten-ID hinzufügen (aus Link-Parameter oder eingefügtem Link). */
+async function addNeighborById(raw) {
   const id = String(raw).trim().toLowerCase();
   if (!NB_ON) { toastLater('Die Nachbarschaft ist bald verfügbar. Dein Garten funktioniert schon.'); return; }
   if (!UUID_RE.test(id)) { toastLater('Dieser Einladungslink ist leider kaputt.'); return; }
@@ -3127,6 +3137,308 @@ function offerReturn(name) {
       el('p', { class: 'stimmung' }, `„${name}“ steht jetzt an deinem Zaun. Wisch nach links und rechts, um zwischen den Gärten zu wechseln.`),
       el('p', { class: 'stimmung leise' }, 'Soll „' + name + '“ auch deinen Garten sehen? Dann schick deinen Link zurück.'),
       el('div', { class: 'reihe' }, nein, ja));
+  });
+}
+
+/* ------------------------------------------------------------------ Konto (1.6)
+   Freiwillig: Name + Passwort (ohne E-Mail). Dann ist der Garten auf allen Geräten derselbe –
+   auch zwischen Safari und der Home-Bildschirm-App (die haben getrennte Speicher).
+   Hochgeladen wird der komplette Stand (garden + privat inkl. Namen, Nachbarn, Token) – Fotos nicht.
+   Das Passwort wird nie gespeichert: Es braucht nur account_register/account_login. Danach weist sich
+   das Gerät mit dem geheimen Garten-Token (privat.nb.token) aus, das alle Geräte des Kontos teilen.
+   Speichern gedrosselt nach saveState, Holen beim Start und beim Zurückkommen in die App.
+   Konflikt (anderes Gerät war schneller): Stand hier gewinnt, Gießtage/Wachstum/neue Pflanzen
+   vom Server werden dazugemischt, dann gespeichert. Im Mock-Modus (?mock) liegen Konten in localStorage. */
+const KONTO_GAP = 2500;
+const KONTO_RE = /^[a-z0-9_.äöüß-]{3,24}$/;
+const MOCK_KONTEN = 'gewohnheitsgarten.mock-konten';
+let kontoTimer = 0, kontoBusy = false, kontoAgain = false, kontoReady = false, kontoHint = false;
+const konto = () => (state.privat.konto && state.privat.konto.user ? state.privat.konto : null);
+const kontoName = (s) => String(s == null ? '' : s).trim().toLowerCase();
+
+/** Was ins Konto geht: alles außer Kontodaten und gerätegebundenen Sync-Merkern. */
+function kontoState() {
+  const s = JSON.parse(JSON.stringify(state));
+  delete s.privat.konto;
+  if (s.privat.nb) { delete s.privat.nb.sent; delete s.privat.nb.dirty; }
+  return s;
+}
+const kontoSig = (s) => { const j = JSON.stringify(s); return hashStr(j) + ':' + j.length; };
+const validRemote = (s) => !!(s && typeof s === 'object' && s.garden && Array.isArray(s.garden.plants));
+function persistQuiet() { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) { /* egal */ } }
+
+/* ---------- Backend: Supabase-RPCs oder Mock ---------- */
+function mockKonten() { try { return JSON.parse(localStorage.getItem(MOCK_KONTEN)) || {}; } catch (e) { return {}; } }
+function mockKontenSave(db) { localStorage.setItem(MOCK_KONTEN, JSON.stringify(db)); }
+function mockTokCheck(row, tok) { if (!row || row.tok !== hashStr(tok) + '.' + hashStr(tok + 'x')) { const e = new Error('forbidden'); e.status = 401; e.code = '42501'; throw e; } }
+const kontoApi = {
+  async register(user, pw, st) {
+    if (!MOCK) return sbRpc('account_register', { p_user: user, p_pw: pw, p_state: st });
+    await mockWait();
+    const db = mockKonten();
+    if (db[user]) { const e = new Error('vergeben'); e.status = 400; e.code = 'GG001'; throw e; }
+    const tok = st.privat.nb.token;
+    db[user] = { pw: hashStr(user + ':' + pw), tok: hashStr(tok) + '.' + hashStr(tok + 'x'), state: st, rev: 1 };
+    mockKontenSave(db);
+    return { ok: true, user, rev: 1 };
+  },
+  async login(user, pw) {
+    if (!MOCK) return sbRpc('account_login', { p_user: user, p_pw: pw });
+    await mockWait();
+    const r = mockKonten()[user];
+    if (!r || r.pw !== hashStr(user + ':' + pw)) return { ok: false, error: 'falsch' };
+    return { ok: true, user, rev: r.rev, state: r.state };
+  },
+  async save(user, tok, st, base) {
+    if (!MOCK) return sbRpc('account_save', { p_user: user, p_token: tok, p_state: st, p_base_rev: base });
+    await mockWait();
+    const db = mockKonten(), r = db[user];
+    mockTokCheck(r, tok);
+    if (r.rev !== base) return { ok: false, conflict: true, rev: r.rev, state: r.state };
+    r.state = st; r.rev++;
+    mockKontenSave(db);
+    return { ok: true, rev: r.rev };
+  },
+  async pull(user, tok, have) {
+    if (!MOCK) return sbRpc('account_pull', { p_user: user, p_token: tok, p_have_rev: have });
+    await mockWait();
+    const r = mockKonten()[user];
+    mockTokCheck(r, tok);
+    return r.rev > have ? { ok: true, rev: r.rev, state: r.state } : { ok: true, rev: r.rev };
+  }
+};
+
+/** Stand aus dem Konto übernehmen (ersetzt den lokalen) und alles neu zeichnen. */
+function kontoApply(remote, rev, user) {
+  if (!validRemote(remote)) return false;
+  remote.privat = remote.privat && typeof remote.privat === 'object' ? remote.privat : { names: {} };
+  remote.privat.konto = { user, rev };
+  try { localStorage.setItem(STORE, JSON.stringify(remote)); } catch (e) { toast('Speichern hat leider nicht geklappt.'); return false; }
+  state = loadState();
+  if (!state.privat.konto) state.privat.konto = { user, rev };
+  const L = levelOfXp(state.garden.xp); // wie saveState, damit die Signatur gleich bleibt
+  state.garden.level = L;
+  state.garden.deko = DEKO.filter((d) => d.lv <= L).map((d) => d.id);
+  state.privat.konto.sig = kontoSig(kontoState());
+  saveState();
+  loadCache();
+  if (view) showGarden(0); else { refresh(); renderNav(); }
+  renderLabels();
+  return true;
+}
+/** Konflikt (anderes Gerät hat inzwischen gespeichert): Der Stand hier ist die jüngste Aktion und gewinnt.
+    Vom Server kommen dazu: Gießtage und Wachstum (vereinigt), dort neu gesetzte Pflanzen, Nachbarn. */
+function kontoMerge(remote) {
+  const loc = kontoState();
+  if (!validRemote(remote)) return loc;
+  const rpv = remote.privat || {}, rnames = rpv.names || {};
+  const byId = new Map(loc.garden.plants.map((p) => [p.id, p]));
+  for (const rp of remote.garden.plants) {
+    const lp = byId.get(rp.id);
+    if (!lp) { loc.garden.plants.push(rp); if (rnames[rp.id] && !loc.privat.names[rp.id]) loc.privat.names[rp.id] = rnames[rp.id]; continue; }
+    lp.days = [...new Set([...(lp.days || []), ...(rp.days || [])])].sort((x, y) => x - y);
+    if (rp.lastWatered != null && (lp.lastWatered == null || rp.lastWatered > lp.lastWatered)) lp.lastWatered = rp.lastWatered;
+    lp.growth = Math.max(lp.growth || 0, rp.growth || 0);
+  }
+  loc.garden.xp = Math.max(loc.garden.xp || 0, remote.garden.xp || 0);
+  const ln = loc.privat.nb, rn = rpv.nb;
+  if (ln && rn && Array.isArray(rn.list)) {
+    ln.list = Array.isArray(ln.list) ? ln.list : [];
+    for (const x of rn.list) if (x && !ln.list.some((y) => y.id === x.id) && ln.list.length < NB_MAX) ln.list.push(x);
+  }
+  return loc;
+}
+function kontoLost() {
+  delete state.privat.konto;
+  persistQuiet();
+  toastLater('Dein Konto passt nicht mehr zu diesem Gerät. Bitte melde dich neu an.');
+}
+function scheduleKonto(soon) {
+  if (!konto()) return;
+  clearTimeout(kontoTimer);
+  kontoTimer = setTimeout(kontoSave, soon ? 0 : KONTO_GAP);
+}
+async function kontoSave() {
+  const k = konto();
+  if (!k || !kontoReady) return; // beim Start erst holen, dann speichern
+  if (kontoBusy) { kontoAgain = true; return; }
+  const st = kontoState(), sig = kontoSig(st);
+  if (sig === k.sig || navigator.onLine === false) return;
+  kontoBusy = true;
+  try {
+    const r = await kontoApi.save(k.user, st.privat.nb.token, st, k.rev);
+    if (r && r.conflict) {
+      if (kontoApply(kontoMerge(r.state), r.rev, k.user)) { konto().sig = ''; kontoAgain = true; }
+    } else if (r && r.ok && konto()) {
+      konto().rev = r.rev; konto().sig = sig;
+      persistQuiet();
+    }
+  } catch (e) {
+    if (e.code === '42501') kontoLost();
+    else if (!kontoHint && e.status) { kontoHint = true; toastLater('Dein Konto konnte gerade nicht speichern. Später klappt es wieder.'); }
+  } finally {
+    kontoBusy = false;
+    if (kontoAgain) { kontoAgain = false; scheduleKonto(); }
+  }
+}
+async function kontoPull() {
+  const k = konto();
+  if (!k || kontoBusy || navigator.onLine === false) { kontoReady = true; return; }
+  kontoBusy = true;
+  let again = false;
+  try {
+    const r = await kontoApi.pull(k.user, nbData().token, k.rev);
+    if (r && r.ok && r.state && r.rev > k.rev) {
+      const dirty = kontoSig(kontoState()) !== k.sig;
+      if (kontoApply(dirty ? kontoMerge(r.state) : r.state, r.rev, k.user) && dirty) { konto().sig = ''; again = true; }
+    }
+  } catch (e) {
+    if (e.code === '42501') kontoLost();
+  } finally {
+    kontoBusy = false; kontoReady = true;
+    scheduleKonto(again);
+  }
+}
+function setupKonto() {
+  kontoPull();
+  document.addEventListener('visibilitychange', () => {
+    if (!konto()) return;
+    if (document.hidden) { clearTimeout(kontoTimer); kontoSave(); } // beim Wechseln sofort sichern
+    else kontoPull();
+  });
+  addEventListener('online', () => { if (konto()) kontoPull(); });
+}
+
+function kontoFehler(e, r) {
+  if (r && r.error === 'gesperrt') return `Zu viele Fehlversuche. Bitte in ${Math.max(1, Math.ceil((r.wait || 300) / 60))} Min. nochmal.`;
+  if (r && r.error === 'falsch') return 'Name oder Passwort stimmt nicht.';
+  if (e && e.code === 'GG001') return 'Diesen Namen gibt es schon. Bitte nimm einen anderen.';
+  if (e && e.status) return 'Das hat nicht geklappt. Bitte prüf Name und Passwort.';
+  return 'Keine Verbindung. Bitte später nochmal versuchen.';
+}
+/** Blatt „Konto anlegen“ (mode 'neu') oder „Anmelden“. Das Passwort lebt nur in diesem Blatt. */
+function openKonto(mode) {
+  const neu = mode === 'neu';
+  openSheet((b) => {
+    b.setAttribute('aria-label', neu ? 'Konto anlegen' : 'Anmelden');
+    const form = el('form', { class: 'konto-form', autocomplete: 'on' });
+    const name = el('input', { class: 'feld', type: 'text', name: 'username', maxlength: '24', placeholder: 'Name, z. B. leo', autocomplete: 'username', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', 'aria-label': 'Name' });
+    const pw = el('input', { class: 'feld', type: 'password', name: 'password', maxlength: '72', placeholder: neu ? 'Passwort (mind. 6 Zeichen)' : 'Passwort', autocomplete: neu ? 'new-password' : 'current-password', 'aria-label': 'Passwort' });
+    const pw2 = neu ? el('input', { class: 'feld', type: 'password', maxlength: '72', placeholder: 'Passwort wiederholen', autocomplete: 'new-password', 'aria-label': 'Passwort wiederholen' }) : null;
+    const fehler = el('p', { class: 'konto-fehler', role: 'alert' });
+    const ok = el('button', { class: 'knopf haupt', type: 'submit' }, neu ? 'Konto anlegen' : 'Anmelden');
+    const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Zurück');
+    ab.addEventListener('click', () => openNeighborhood());
+    const wackel = (inp, msg) => { fehler.textContent = msg; inp.classList.remove('wackel'); void inp.offsetWidth; inp.classList.add('wackel'); inp.focus(); };
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      if (ok.disabled) return;
+      const u = kontoName(name.value), p = pw.value;
+      if (!KONTO_RE.test(u)) return wackel(name, 'Name: 3–24 Zeichen, nur Buchstaben, Ziffern und . _ -');
+      if (p.length < 6) return wackel(pw, 'Das Passwort braucht mindestens 6 Zeichen.');
+      if (neu && pw2.value !== p) return wackel(pw2, 'Die beiden Passwörter sind nicht gleich.');
+      fehler.textContent = '';
+      ok.disabled = true; ok.textContent = 'Einen Moment …';
+      try {
+        if (neu) {
+          ensureIdentity();
+          const st = kontoState();
+          const r = await kontoApi.register(u, p, st);
+          state.privat.konto = { user: (r && r.user) || u, rev: (r && r.rev) || 1, sig: kontoSig(st) };
+          kontoReady = true;
+          saveState();
+          toast(`Konto „${konto().user}“ ist angelegt. Melde dich auf deinen anderen Geräten damit an.`);
+          openNeighborhood();
+        } else {
+          const r = await kontoApi.login(u, p);
+          if (!r || !r.ok || !validRemote(r.state)) { ok.disabled = false; ok.textContent = 'Anmelden'; fehler.textContent = kontoFehler(null, r || { error: 'falsch' }); return; }
+          kontoUebernehmen(r.user || u, r.state, r.rev);
+        }
+      } catch (e) {
+        ok.disabled = false; ok.textContent = neu ? 'Konto anlegen' : 'Anmelden';
+        fehler.textContent = kontoFehler(e);
+      }
+    });
+    form.append(name, pw, pw2 || '', fehler, el('div', { class: 'reihe' }, ab, ok));
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText(neu ? 'Konto anlegen' : 'Anmelden', 3)),
+      el('p', { class: 'stimmung' }, neu
+        ? 'Ohne E-Mail – nur Name und Passwort. Danach kannst du dich auf jedem Gerät anmelden und hast überall denselben Garten.'
+        : 'Melde dich mit deinem Konto an, dann ist dein Garten auch auf diesem Gerät da.'),
+      form,
+      neu ? el('p', { class: 'stimmung leise' }, '⚠ Passwort vergessen heißt: Konto weg. Es lässt sich nicht zurücksetzen – schreib es dir gut auf. Die Namen deiner Gewohnheiten liegen dann auch auf dem Server, lesbar nur mit deinem Konto. Fotos bleiben auf dem Gerät.') : '');
+    if (!matchMedia('(pointer: coarse)').matches) setTimeout(() => name.focus(), 60);
+  });
+}
+/** Nach dem Anmelden: Garten aus dem Konto übernehmen – bei eigenem Garten hier erst fragen. */
+function kontoUebernehmen(user, remote, rev) {
+  const mine = state.garden.plants.length, theirs = remote.garden.plants.length;
+  const go = () => {
+    if (!kontoApply(remote, rev, user)) { toast('Das hat leider nicht geklappt.'); return; }
+    kontoReady = true;
+    closeSheet();
+    toast(`Willkommen zurück, ${user}! Dein Garten ist jetzt auch hier.`);
+  };
+  if (!mine || remote.garden.id === state.garden.id) { go(); return; }
+  openSheet((b) => {
+    b.setAttribute('aria-label', 'Garten übernehmen');
+    const ja = el('button', { class: 'knopf haupt', type: 'button' }, 'Übernehmen');
+    const nein = el('button', { class: 'knopf leise', type: 'button' }, 'Lieber nicht');
+    ja.addEventListener('click', go);
+    nein.addEventListener('click', () => { toast('Nicht angemeldet – dein Garten hier bleibt, wie er ist.'); openNeighborhood(); });
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Anmelden', 3)),
+      el('p', { class: 'stimmung gross' }, 'Garten aus dem Konto übernehmen?'),
+      el('p', { class: 'stimmung' }, `Im Konto „${user}“ wachsen ${theirs} ${theirs === 1 ? 'Pflanze' : 'Pflanzen'}. Der Garten hier auf diesem Gerät (${mine} ${mine === 1 ? 'Pflanze' : 'Pflanzen'}) wird dabei ersetzt.`),
+      el('p', { class: 'stimmung leise' }, 'Danach ist auf all deinen Geräten derselbe Garten.'),
+      el('div', { class: 'reihe' }, nein, ja));
+  });
+}
+/** Bereich „Konto“ im Nachbarschafts-Blatt. */
+function kontoBereich() {
+  const k = konto();
+  const box = el('div', { class: 'konto-box' });
+  const fill = () => {
+    const titel = el('p', { class: 'konto-titel' }, '🔑 Konto');
+    if (k) {
+      const ab = el('button', { class: 'knopf', type: 'button' }, 'Abmelden');
+      ab.addEventListener('click', () => {
+        nbConfirming = true;
+        const ja = el('button', { class: 'knopf gefahr', type: 'button' }, 'Abmelden');
+        const nein = el('button', { class: 'knopf leise', type: 'button' }, 'Angemeldet bleiben');
+        ja.addEventListener('click', () => { clearTimeout(kontoTimer); delete state.privat.konto; saveState(); toast('Abgemeldet. Dein Garten bleibt auf diesem Gerät.'); openNeighborhood(); });
+        nein.addEventListener('click', () => { nbConfirming = false; fill(); });
+        box.replaceChildren(titel, el('p', { class: 'frage' }, 'Abmelden? Dein Garten bleibt hier, wird aber nicht mehr mit deinen anderen Geräten abgeglichen.'), el('div', { class: 'reihe' }, nein, ja));
+      });
+      box.replaceChildren(titel, el('p', { class: 'stimmung' }, 'Angemeldet als ', el('strong', null, k.user), '. Dein Garten ist auf all deinen Geräten derselbe.'), el('div', { class: 'reihe' }, ab));
+    } else {
+      const neu = el('button', { class: 'knopf', type: 'button' }, 'Konto anlegen');
+      const an = el('button', { class: 'knopf', type: 'button' }, 'Anmelden');
+      neu.addEventListener('click', () => openKonto('neu'));
+      an.addEventListener('click', () => openKonto('an'));
+      box.replaceChildren(titel, el('p', { class: 'stimmung' }, 'Mit Name und Passwort hast du deinen Garten auf allen Geräten – auch in Safari und in der App auf dem Home-Bildschirm.'), el('div', { class: 'reihe' }, neu, an));
+    }
+  };
+  fill();
+  return box;
+}
+
+/** Einladungslink einfügen (ganzer Link oder nur die Garten-ID). */
+function openInviteEinfuegen() {
+  openSheet((b) => {
+    b.setAttribute('aria-label', 'Einladungslink einfügen');
+    const inp = el('input', { class: 'feld', type: 'text', placeholder: 'Link oder Garten-Code', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', enterkeyhint: 'go', 'aria-label': 'Einladungslink' });
+    const ok = el('button', { class: 'knopf haupt', type: 'button' }, 'Hinzufügen');
+    const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Zurück');
+    ok.addEventListener('click', () => {
+      const m = inp.value.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+      if (!m) { inp.classList.remove('wackel'); void inp.offsetWidth; inp.classList.add('wackel'); inp.focus(); toast('Darin steckt kein Einladungslink.'); return; }
+      addNeighborById(m[0]);
+    });
+    ab.addEventListener('click', () => openNeighborhood());
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') ok.click(); });
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Einladung', 3)),
+      el('p', { class: 'stimmung' }, 'Hat dir jemand einen Einladungslink geschickt, der in Safari statt in der App aufgeht? Kopier ihn und füg ihn hier ein.'),
+      inp, el('div', { class: 'reihe' }, ab, ok));
+    if (!matchMedia('(pointer: coarse)').matches) setTimeout(() => inp.focus(), 60);
   });
 }
 
@@ -3192,6 +3504,7 @@ function setupNeighborhood() {
     if (pollWanted()) { if (Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll(); }
   });
   scheduleSync();                    // beim Start (nur bei Änderung)
+  setupKonto();                      // 1.6: Konto-Stand holen
   if (nbData().list.length) pollNow(true); // einmal frische Stände für die Punkte-Leiste
   handleInviteParam();
   handleGiessParam();
