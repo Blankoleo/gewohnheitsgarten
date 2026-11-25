@@ -19,7 +19,7 @@
 'use strict';
 (function () {
 
-const VERSION = '1.4';
+const VERSION = '1.4.1';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -424,7 +424,8 @@ const DRAW = {
     angs.forEach((a, i) => {
       const k = Math.abs(a + Math.PI / 2) / cfg.spread;
       // ab Prächtig: äußere Wedel länger und bogig überhängend, Längen unregelmäßig
-      const len = cfg.len * (ex ? (0.82 + 0.25 * k) * (0.9 + 0.2 * ((i * 7) % 5) / 4) : (1 - 0.3 * k));
+      // (der längste Wedel i=2 hängt auf Prächtig/Riesig sonst über den Sprite-Rand → harte Kante)
+      const len = cfg.len * (ex ? (0.82 + 0.25 * k) * (0.9 + 0.2 * ((i * 7) % 5) / 4) * (i === 2 ? [1, 0.93, 0.85, 1][ex] : 1) : (1 - 0.3 * k));
       const shade = i / angs.length;
       const arch = ex ? Math.min(0.95, d + k * (0.3 + ex * 0.13)) : d;
       frond(b, CX + (a + Math.PI / 2) * 1.6, BY, a, len, arch, mix(D, G, 0.35 + shade * 0.65), D, mix(G, Li, shade), ex ? 1.45 : 1);
