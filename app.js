@@ -26,7 +26,7 @@
 'use strict';
 (function () {
 
-const VERSION = '2.2';
+const VERSION = '2.2.1';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -3724,15 +3724,19 @@ let purging = false;
 async function purgeFotos() {
   if (purging) return;
   purging = true;
+  let privatWeg = false;
   try {
     const t = today(), ids = new Set(state.garden.plants.map((p) => p.id));
     for (const [pid, m] of [...fotoIdx]) {
       const orphan = !ids.has(pid);
+      // 2.2.1: früher geteiltes Foto einer versteckten Gewohnheit vom Server nehmen (hier behalten)
+      if (!orphan && fotoPrivat(pid) && m.synced && !m.local) { queueFotoDelete(pid); m.synced = false; m.local = true; fotoPutMeta(m).catch(() => {}); privatWeg = true; }
       if (fotoFresh(m.day, t) && !orphan) continue;
       fotoIdx.delete(pid);
       try { await fotoDelLocal(pid); } catch (e) { /* egal */ }
       if (orphan && m.synced) queueFotoDelete(pid); // abgelaufene löscht der Server selbst
     }
+    if (privatWeg) { saveState(); setTimeout(syncFotos, 0); }
   } finally { purging = false; }
 }
 function queueFotoDelete(pid) {
