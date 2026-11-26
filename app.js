@@ -26,7 +26,7 @@
 'use strict';
 (function () {
 
-const VERSION = '2.2.3';
+const VERSION = '2.2.4';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -4065,8 +4065,8 @@ function sanitizeFoto(f) {
 }
 
 /* ---------- Nachbar-Fotos: nur beim Antippen laden, wenige im Speicher ---------- */
-async function nbFoto(gid, pid) {
-  const key = gid + ':' + pid;
+async function nbFoto(gid, pid, tag) {
+  const key = gid + ':' + pid + ':' + (tag == null ? '' : tag); // 2.2.4: neues Foto derselben Pflanze nicht mit altem Bild verwechseln
   if (nbFotoCache.has(key)) { const v = nbFotoCache.get(key); nbFotoCache.delete(key); nbFotoCache.set(key, v); return v; }
   const r = await backend.getFoto(gid, pid);
   if (!r || !FOTO_MIMES.includes(r.mime) || typeof r.data !== 'string' || r.data.length > 90000 || !B64_RE.test(r.data)) return null;
@@ -4139,7 +4139,7 @@ function openFoto(p) {
       if (rec && rec.data && m) show(`data:${m.mime};base64,${rec.data}`); else fail('Foto nicht gefunden');
     }).catch(() => fail('Foto nicht gefunden'));
   } else {
-    nbFoto(gid, p.id).then((v) => { if (v) show(v.url); else fail('Schon verblüht'); }).catch(() => fail('Gerade offline'));
+    nbFoto(gid, p.id, f.d).then((v) => { if (v) show(v.url); else fail('Schon verblüht'); }).catch(() => fail('Gerade offline'));
   }
 }
 
