@@ -26,7 +26,7 @@
 'use strict';
 (function () {
 
-const VERSION = '2.2.2';
+const VERSION = '2.2.3';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -2324,6 +2324,13 @@ function rhythmPicker(get, set, species, note) {
   return { node: el('div', { class: 'rhythmus' }, hint, row), update };
 }
 
+/** 2.2.3: kurz, wie oft gegossen werden soll und wie weit man ist. */
+function rhythmText(p, t = today()) {
+  if (p.paused != null) return '💤 macht Pause';
+  if (p.goal >= 7) return `💧 täglich · ${wateredToday(p, t) ? 'heute gegossen ✓' : 'heute noch nicht'}`;
+  const n = Math.min(weekCount(p, t), 99);
+  return `💧 ${GOAL_LABEL[p.goal]} · diese Woche ${n} von ${p.goal}${n >= p.goal ? ' ✓' : ''}`;
+}
 function weekText(p, t) {
   if (p.paused != null) {
     const rest = isFinite(p.pauseEnd) ? p.pauseEnd - t : 0;
@@ -2332,7 +2339,7 @@ function weekText(p, t) {
   if (p.goal >= 7) return wateredToday(p, t) ? 'Täglich · heute erledigt' : 'Täglich · heute noch offen';
   const n = weekCount(p, t);
   const drops = '💧'.repeat(Math.min(n, p.goal)) + '○'.repeat(Math.max(0, p.goal - n)) + (n > p.goal ? ' ✨' : '');
-  return `Diese Woche ${drops}  ${n} von ${p.goal}`;
+  return `${GOAL_LABEL[p.goal]} · diese Woche ${drops}  ${n} von ${p.goal}`;
 }
 
 function moodText(p, st, cond, wt) {
@@ -2938,7 +2945,7 @@ function agoText(iso) {
   return `zuletzt aktiv vor ${d} ${d === 1 ? 'Tag' : 'Tagen'}`;
 }
 const fremdName = (p) => p.name || SPECIES[p.species].name; // Nachbar-Pflanze: Gewohnheit, falls geteilt
-function plantInfo(p) { return `${p.name ? p.name + ' · ' : ''}${SPECIES[p.species].name} · ${stageName(p.species, stageOf(p.growth))}${p.paused != null ? ' · Pause 💤' : ''}${p.hand ? ' · ✋' : ''}`; }
+function plantInfo(p) { return `${p.name ? p.name + ' · ' : ''}${SPECIES[p.species].name} · ${stageName(p.species, stageOf(p.growth))}${p.paused != null ? ' · Pause 💤' : ` · ${GOAL_SHORT[p.goal] || ''}${p.goal >= 7 ? '' : ' pro Woche'}`}${p.hand ? ' · ✋' : ''}`; }
 
 /* ---------- Gartenzaun-Ansicht: eigener Garten + Nachbarn ---------- */
 let viewIdx = 0;
@@ -3901,6 +3908,7 @@ function giessBlatt(p) {
     ab.addEventListener('click', closeSheet);
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Gießen', 3)),
       el('p', { class: 'stimmung' }, `${nameOf(p)} hat Durst.`),
+      el('p', { class: 'stimmung leise' }, rhythmText(p)),
       el('div', { class: 'reihe' }, ab, ok));
   });
 }
@@ -3924,6 +3932,7 @@ function giessMitFoto(p) {
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Gießen', 3)),
       el('p', { class: 'stimmung gross' }, '📸'),
       el('p', { class: 'stimmung' }, `${nameOf(p)} bekommt Wasser, sobald du ein kleines Foto als Nachweis gemacht hast.`),
+      el('p', { class: 'stimmung leise' }, rhythmText(p)),
       el('div', { class: 'reihe' }, kamera), el('div', { class: 'reihe' }, ab, galerie));
   });
 }

@@ -1,6 +1,6 @@
 /* Gewohnheits-Garten – Service Worker.
    Bei jeder Änderung an den Dateien den Cache-Namen erhöhen (garten-v4, …). */
-const CACHE = 'garten-v16';
+const CACHE = 'garten-v17';
 const FILES = [
   './',
   './index.html',
