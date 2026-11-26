@@ -1,6 +1,6 @@
 /* Gewohnheits-Garten – Service Worker.
    Bei jeder Änderung an den Dateien den Cache-Namen erhöhen (garten-v4, …). */
-const CACHE = 'garten-v12';
+const CACHE = 'garten-v13';
 const FILES = [
   './',
   './index.html',
@@ -57,5 +57,34 @@ self.addEventListener('fetch', (e) => {
         if (!done) { done = true; resolve(m || new Response('Offline', { status: 503 })); }
       });
     });
+  }));
+});
+
+/* 2.1: Push-Mitteilungen (Herzen & Kommentare, Gieß-Erinnerung, neue Fotos).
+   Jede Mitteilung wird angezeigt (iOS verlangt das). Gleicher tag = ersetzt die vorige. */
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (x) { d = { body: e.data ? e.data.text() : '' }; }
+  const title = String(d.title || 'Gewohnheits-Garten').slice(0, 80);
+  const url = /^\.\/(\?[A-Za-z0-9=._&-]*)?$/.test(String(d.url || '')) ? d.url : './';
+  e.waitUntil(self.registration.showNotification(title, {
+    body: String(d.body || '').slice(0, 160),
+    icon: './icons/icon-192.png',
+    badge: './icons/icon-192.png',
+    tag: String(d.tag || 'garten').slice(0, 80),
+    data: { url }
+  }));
+});
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = new URL((e.notification.data && e.notification.data.url) || './', self.registration.scope).href;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+    const offen = list.find((c) => c.url.startsWith(self.registration.scope));
+    if (offen) {
+      offen.postMessage({ type: 'garten-oeffnen', url }); // App ist schon da: direkt zum Foto
+      return offen.focus();
+    }
+    return self.clients.openWindow(url);
   }));
 });

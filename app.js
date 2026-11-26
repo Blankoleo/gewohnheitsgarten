@@ -1,9 +1,11 @@
-/* Gewohnheits-Garten 2.0 „Gemeinde“
+/* Gewohnheits-Garten 2.1 „Herzen“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage (+ Konto in Supabase).
    2.0: Konto ist Pflicht (Anlegen nur mit Gemeinde-Code), alle Konten sehen sich automatisch
    am Zaun, Sichtbarkeit des Namens pro Gewohnheit (privat.sichtbar).
+   2.1: Herzen und kurze Kommentare an Fotos (nur im geöffneten Polaroid), Push-Mitteilungen
+   (🏠 → 🔔 Mitteilungen: Herzen & Kommentare, Gieß-Erinnerung, neue Fotos – je Gerät abschaltbar).
 
    Debug (versteckt):
      ?tag=+3      simuliert 3 Tage später (auch ?tag=-1)
@@ -21,7 +23,7 @@
 'use strict';
 (function () {
 
-const VERSION = '2.0';
+const VERSION = '2.1';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -2549,6 +2551,8 @@ const CFG = window.GARTEN_CONFIG || {};
 const SB_URL = String(CFG.supabaseUrl || '').trim().replace(/\/+$/, '');
 const SB_KEY = String(CFG.supabaseAnonKey || '').trim();
 const NB_ON = MOCK || !!(SB_URL && SB_KEY);
+const SOCIAL_ON = NB_ON && !MOCK; // 2.1 Herzen/Kommentare/Mitteilungen nur mit echtem Backend
+const VAPID_KEY = String(CFG.vapidPublicKey || '').trim();
 const NB_MAX = 40, POLL_MS = 25000, SYNC_GAP = 10000, SNAP_MAX = 20000, NAME_MAX = 40;
 const MOCK_DB = 'gewohnheitsgarten.mock-db';
 const CACHE_KEY = STORE + '.gemeinde';
@@ -2812,6 +2816,9 @@ async function pollNow(always) {
       renderNav();
     }
     if (changedAny && overviewOpen && !nbConfirming) openGemeinde(); // Übersicht auffrischen
+    gemeindeGeladen = true;
+    if (fotoWartet) oeffneFotoWartend();
+    else socialRefresh();
   } catch (e) {
     if (e.code === '42501') kontoLost();
   }
@@ -2890,6 +2897,7 @@ function showGarden(idx, dir) {
   if (dir) { canvas.classList.remove('rein-l', 'rein-r'); void canvas.offsetWidth; canvas.classList.add(dir > 0 ? 'rein-r' : 'rein-l'); }
   markFotosSeen();
   if (view && Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll();
+  socialRefresh();
 }
 function titleNode() {
   const sc = innerWidth < 400 ? 2 : 3;
@@ -3037,8 +3045,14 @@ function openGemeinde() {
     kontoBtn.addEventListener('click', () => openKontoMenu());
     const zu = el('button', { class: 'knopf leise', type: 'button' }, 'Schließen');
     zu.addEventListener('click', closeSheet);
+    let pushBtn = '';
+    if (SOCIAL_ON) {
+      pushBtn = el('button', { class: 'knopf', type: 'button' }, '🔔 Mitteilungen');
+      pushBtn.addEventListener('click', () => openMitteilungen());
+      pushBtn = el('div', { class: 'reihe' }, pushBtn);
+    }
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Gemeinde', 3)), liste, leer, code,
-      el('div', { class: 'reihe' }, widgetBtn, kontoBtn), el('div', { class: 'reihe' }, zu),
+      pushBtn, el('div', { class: 'reihe' }, widgetBtn, kontoBtn), el('div', { class: 'reihe' }, zu),
       MOCK ? el('p', { class: 'stimmung leise' }, `Testmodus (Mock, Profil „${MOCK_PROFILE}“).`) : '');
   });
   blatt.scrollTop = keep;
@@ -3406,6 +3420,7 @@ function nachAnmeldung() {
   renderNav();
   scheduleSync(true);
   pollNow(true);
+  pushRefresh();
   if (giessWartet) { giessWartet = false; setTimeout(handleGiessParam, 400); }
 }
 /** Abmelden: Garten bleibt auf dem Gerät, Tor erscheint. */
@@ -3414,6 +3429,7 @@ async function abmelden() {
   if (!k) return;
   clearTimeout(kontoTimer); clearTimeout(pollTimer);
   try { await kontoSave(); } catch (e) { /* bleibt lokal */ }
+  await pushAbmelden(k);
   state.privat.warKonto = k.user;
   delete state.privat.konto;
   persistQuiet();
@@ -3535,7 +3551,9 @@ function setupNeighborhood() {
     if (document.hidden) { clearTimeout(pollTimer); return; }
     if (nbData().dirty) scheduleSync(true); else syncFotos();
     if (pollWanted()) { if (Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll(); }
+    socialRefresh();
   });
+  handleFotoParam();                 // 2.1: aus einer Mitteilung geöffnet (?foto=garten.pflanze)
   setupKonto();                      // Konto-Stand holen
   if (!konto()) {                    // 2.0: ohne Konto kein Garten
     giessWartet = params.has('giessen');
@@ -3545,6 +3563,7 @@ function setupNeighborhood() {
   scheduleSync();                    // beim Start (nur bei Änderung)
   pollNow(true);                     // einmal frische Stände für die Punkte-Leiste
   handleGiessParam();
+  pushRefresh();                     // 2.1: Push-Abo dieses Geräts frisch halten
 }
 function houseIcon() {
   const c = document.createElement('canvas'); c.width = 13; c.height = 11;
@@ -3985,7 +4004,9 @@ function openFoto(p) {
       };
       showDel();
     } else area.append(zu);
-    b.append(fig, cap, area);
+    const soz = socialKey(p, f);
+    if (soz) b.append(fig, cap, socialUI(soz, fig), area);
+    else b.append(fig, cap, area);
   });
   tok = sheetToken;
   const show = (url) => {
@@ -4004,6 +4025,308 @@ function openFoto(p) {
   }
 }
 
+/* ------------------------------------------------------------------ Herzen & Kommentare (2.1)
+   Nur im geöffneten Polaroid: kleines Herz in der Ecke (gefüllt = ich habe geherzt, keine Zahlen)
+   und darunter kurze Kommentare. Beim eigenen Foto stehen die Namen derer, die geherzt haben.
+   Am Foto-Pin höchstens ein winziges ❤ (nur wenn es Herzen gibt). Alles gehört zu genau einem Foto
+   (Garten, Pflanze, Tag) und verschwindet mit ihm. Nutzertexte immer per textContent (el()). */
+const KOMMENTAR_MAX = 140;
+const socialCache = new Map(); // "garten:pflanze:JJJJ-MM-TT" -> { herz, mine, who, comments }
+const socialAt = new Map();    // Garten-ID -> letzter Abruf (Drosselung)
+let socialBusy = false;
+
+/** Schlüssel eines Fotos – nur für geteilte Fotos von Konten der Gemeinde. */
+function socialKey(p, f) {
+  if (!SOCIAL_ON || !konto() || !f) return null;
+  let g;
+  if (p.nb) { g = view && view.id; }
+  else {
+    const m = fotosLoaded && fotoIdx.get(p.id);
+    if (!m || !m.synced || m.local || !sharing()) return null;
+    g = state.garden.id;
+  }
+  if (!g || !UUID_RE.test(g)) return null;
+  const d = isoDay(f.d);
+  return { g, p: p.id, d, key: `${g}:${p.id}:${d}`, own: !p.nb };
+}
+function socialSet(row) {
+  if (!row || typeof row !== 'object') return;
+  const key = `${row.g}:${row.p}:${String(row.d).slice(0, 10)}`;
+  const comments = (Array.isArray(row.comments) ? row.comments : []).slice(0, 50).map((c) => ({
+    id: Number(c.id), u: cleanName(c.u) || '?', t: String(c.t == null ? '' : c.t).slice(0, KOMMENTAR_MAX), own: !!c.own, del: !!c.del
+  })).filter((c) => isFinite(c.id) && c.t);
+  socialCache.set(key, {
+    herz: !!row.herz, mine: !!row.mine,
+    who: (Array.isArray(row.who) ? row.who : []).slice(0, 30).map((n) => cleanName(n)).filter(Boolean),
+    comments
+  });
+}
+/** Herzen/Kommentare zu Fotos holen. list: [{ g, p, d, key }] */
+async function socialLoad(list) {
+  const k = konto();
+  if (!k || !list.length) return false;
+  const rows = await sbRpc('photo_social', { p_user: k.user, p_token: nbData().token, p_fotos: list.slice(0, 60).map((x) => ({ g: x.g, p: x.p, d: x.d })) });
+  if (konto() !== k) return false;
+  const seen = new Set();
+  for (const r of Array.isArray(rows) ? rows : []) { socialSet(r); seen.add(`${r.g}:${r.p}:${String(r.d).slice(0, 10)}`); }
+  for (const x of list) if (!seen.has(x.key)) socialCache.delete(x.key); // Foto weg -> nichts mehr anzeigen
+  while (socialCache.size > 200) socialCache.delete(socialCache.keys().next().value);
+  return true;
+}
+/** Pins des sichtbaren Gartens auffrischen (gedrosselt, nie bei verborgener Seite). */
+async function socialRefresh() {
+  if (!SOCIAL_ON || !konto() || document.hidden || socialBusy || navigator.onLine === false) return;
+  const gid = view ? view.id : state.garden.id;
+  if (Date.now() - (socialAt.get(gid) || 0) < 60000) return;
+  const list = vPlants().map((p) => socialKey(p, fotoOf(p))).filter(Boolean);
+  if (!list.length) return;
+  socialBusy = true; socialAt.set(gid, Date.now());
+  try {
+    const vorher = list.map((x) => !!(socialCache.get(x.key) || {}).herz).join();
+    await socialLoad(list);
+    if (list.map((x) => !!(socialCache.get(x.key) || {}).herz).join() !== vorher) renderLabels();
+  } catch (e) {
+    if (e.code === '42501') kontoLost();
+  } finally { socialBusy = false; }
+}
+function socialFehler(e) {
+  if (e.code === '42501') { kontoLost(); return; }
+  if (e.code === 'GG010') toast('Dieses Foto ist schon verblüht.');
+  else if (e.code === 'GG011') toast('Kurz durchatmen – gleich geht es wieder.');
+  else if (e.code === '22023') toast(`Höchstens ${KOMMENTAR_MAX} Zeichen.`);
+  else toast(navigator.onLine === false ? 'Gerade offline.' : 'Hat nicht geklappt. Versuch es gleich nochmal.');
+}
+
+/** Herz (Ecke des Polaroids) + Kommentare unter dem Polaroid. */
+function socialUI(soz, fig) {
+  const tok = sheetToken; // wird innerhalb von openSheet gebaut: das Blatt hat schon seine Nummer
+  const herz = el('button', { class: 'polaroid-herz', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Herz geben' });
+  fig.append(herz);
+  const wer = el('p', { class: 'herz-namen', hidden: '' });
+  const liste = el('ul', { class: 'kommentare' });
+  const feld = el('input', { class: 'feld kommentar-feld', type: 'text', maxlength: String(KOMMENTAR_MAX), placeholder: 'Kommentar …', enterkeyhint: 'send', autocomplete: 'off', 'aria-label': 'Kommentar schreiben' });
+  const senden = el('button', { class: 'knopf klein', type: 'submit' }, 'Senden');
+  const form = el('form', { class: 'kommentar-form' }, feld, senden);
+  let offen = null; // Kommentar-ID mit sichtbarem „löschen“
+
+  const zeig = () => {
+    if (tok !== sheetToken) return;
+    const d = socialCache.get(soz.key) || { herz: false, mine: false, who: [], comments: [] };
+    herz.textContent = d.mine ? '❤' : '♡';
+    herz.classList.toggle('an', d.mine);
+    herz.setAttribute('aria-pressed', String(d.mine));
+    herz.setAttribute('aria-label', d.mine ? 'Herz zurücknehmen' : 'Herz geben');
+    if (soz.own && d.who.length) { wer.hidden = false; wer.textContent = '❤ ' + d.who.join(', '); }
+    else { wer.hidden = true; wer.textContent = ''; }
+    liste.replaceChildren(...d.comments.map((c) => {
+      const li = el('li', { class: 'kommentar' + (c.del ? ' loeschbar' : '') }, el('strong', null, c.u), ': ', el('span', null, c.t));
+      if (c.del) {
+        li.setAttribute('tabindex', '0');
+        li.setAttribute('aria-label', `${c.u}: ${c.t} – antippen zum Löschen`);
+        li.addEventListener('click', () => { offen = offen === c.id ? null : c.id; zeig(); });
+        if (offen === c.id) {
+          const weg = el('button', { class: 'kommentar-weg', type: 'button' }, 'löschen');
+          weg.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            if (weg.disabled) return; weg.disabled = true;
+            const k = konto();
+            try {
+              await sbRpc('photo_comment_delete', { p_user: k.user, p_token: nbData().token, p_id: c.id });
+              const cur = socialCache.get(soz.key);
+              if (cur) cur.comments = cur.comments.filter((x) => x.id !== c.id);
+              offen = null; zeig();
+            } catch (e) { weg.disabled = false; socialFehler(e); }
+          });
+          li.append(' ', weg);
+        }
+      }
+      return li;
+    }));
+  };
+
+  herz.addEventListener('click', async () => {
+    if (herz.disabled) return;
+    const k = konto();
+    if (!k) return;
+    const d = socialCache.get(soz.key) || { herz: false, mine: false, who: [], comments: [] };
+    socialCache.set(soz.key, d);
+    const vorher = { herz: d.herz, mine: d.mine };
+    d.mine = !d.mine; if (d.mine) d.herz = true; // sofort zeigen
+    herz.disabled = true; zeig();
+    try {
+      const r = await sbRpc('photo_like_toggle', { p_user: k.user, p_token: nbData().token, p_garden: soz.g, p_plant: soz.p, p_day: soz.d });
+      d.mine = !!(r && r.mine);
+      await socialLoad([soz]).catch(() => {});
+    } catch (e) { Object.assign(d, vorher); socialFehler(e); }
+    herz.disabled = false; zeig(); renderLabels();
+  });
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const text = feld.value.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, KOMMENTAR_MAX);
+    if (!text || senden.disabled) return;
+    const k = konto();
+    if (!k) return;
+    senden.disabled = true;
+    try {
+      await sbRpc('photo_comment_add', { p_user: k.user, p_token: nbData().token, p_garden: soz.g, p_plant: soz.p, p_day: soz.d, p_text: text });
+      feld.value = '';
+      await socialLoad([soz]).catch(() => {});
+      zeig();
+      liste.lastElementChild && liste.lastElementChild.scrollIntoView({ block: 'nearest' });
+    } catch (e) { socialFehler(e); }
+    senden.disabled = false;
+  });
+
+  zeig();
+  socialLoad([soz]).then(zeig).catch((e) => { if (e.code === '42501') kontoLost(); });
+  return el('div', { class: 'sozial' }, wer, liste, form);
+}
+
+/* ---------- Aus einer Mitteilung: ?foto=<garten>.<pflanze> -> Garten zeigen, Polaroid öffnen ---------- */
+let fotoWartet = null, gemeindeGeladen = false;
+function fotoAusUrl(v) {
+  const m = /^([0-9a-f-]{36})\.([A-Za-z0-9-]{1,64})$/i.exec(String(v || ''));
+  return m && UUID_RE.test(m[1]) ? { g: m[1].toLowerCase(), p: m[2] } : null;
+}
+function handleFotoParam() {
+  if (!params.has('foto')) return;
+  fotoWartet = fotoAusUrl(params.get('foto'));
+  const u = new URL(location.href);
+  u.searchParams.delete('foto');
+  history.replaceState(null, '', u.toString());
+}
+function oeffneFotoWartend() {
+  const w = fotoWartet;
+  if (!w || !konto()) return;
+  if (w.g === state.garden.id) {
+    if (!fotosLoaded) return; // kommt nach loadFotos nochmal
+    fotoWartet = null;
+    if (view) showGarden(0, -1);
+    const p = state.garden.plants.find((x) => x.id === w.p);
+    if (p && fotoOf(p)) openFoto(p);
+    return;
+  }
+  const i = gemeinde.indexOf(w.g);
+  if (i < 0) { if (gemeindeGeladen) fotoWartet = null; return; } // nach dem ersten Laden nochmal
+  fotoWartet = null;
+  if (!view || view.id !== w.g) showGarden(i + 1, 1);
+  const p = view && view.plants.find((x) => x.id === w.p);
+  if (p && fotoOf(p)) openFoto(p);
+}
+
+/* ------------------------------------------------------------------ Mitteilungen (2.1, Web Push)
+   iPhone: nur in der App vom Home-Bildschirm (iOS 16.4+). Pro Gerät ein Abo, gespeichert per push_save
+   (Konto + Token). Drei Arten, alle an/aus: herzen (Herzen & Kommentare), giessen (Erinnerung 19:30),
+   fotos (neue Fotos der Gemeinde). Alle aus -> Abo auf dem Server gelöscht (push_delete). */
+const PUSH_KEY = STORE + '.push';
+const PUSH_ARTEN = [['herzen', '❤️ Herzen & Kommentare'], ['giessen', '💧 Gieß-Erinnerung am Abend'], ['fotos', '📸 Neue Fotos der Gemeinde']];
+function pushRec() { try { const r = JSON.parse(localStorage.getItem(PUSH_KEY)); return r && typeof r === 'object' ? r : null; } catch (e) { return null; } }
+function pushRecSave(r) { try { localStorage.setItem(PUSH_KEY, JSON.stringify(r)); } catch (e) { /* egal */ } }
+const pushKann = () => SOCIAL_ON && !!VAPID_KEY && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const istIOS = () => /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const istApp = () => navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+const prefsAn = (pr) => !!pr && PUSH_ARTEN.some(([k]) => pr[k] !== false);
+function vapidBytes() {
+  const s = VAPID_KEY.replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(s + '==='.slice((s.length + 3) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+async function pushAbo(neu) {
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub && neu) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidBytes() });
+  return sub;
+}
+async function pushSpeichern(sub, prefs) {
+  const k = konto();
+  if (!k || !sub) return false;
+  const j = sub.toJSON();
+  if (prefsAn(prefs)) await sbRpc('push_save', { p_user: k.user, p_token: nbData().token, p_sub: { endpoint: j.endpoint, keys: j.keys }, p_prefs: prefs });
+  else await sbRpc('push_delete', { p_user: k.user, p_token: nbData().token, p_endpoint: j.endpoint });
+  pushRecSave({ ep: j.endpoint, prefs, at: Date.now(), user: k.user });
+  return true;
+}
+/** Beim Start: Abo dieses Geräts höchstens einmal am Tag (oder bei neuem Abo/Konto) erneuern. */
+async function pushRefresh() {
+  if (!pushKann() || !konto() || Notification.permission !== 'granted') return;
+  const r = pushRec();
+  if (!r || !prefsAn(r.prefs)) return;
+  try {
+    const sub = await pushAbo(true);
+    if (!sub) return;
+    if (sub.endpoint === r.ep && r.user === konto().user && Date.now() - (r.at || 0) < 86400000) return;
+    await pushSpeichern(sub, r.prefs);
+  } catch (e) { if (e.code === '42501') kontoLost(); }
+}
+/** Beim Abmelden: dieses Gerät bekommt keine Mitteilungen mehr für das Konto (Einstellung bleibt). */
+async function pushAbmelden(k) {
+  const r = pushRec();
+  if (!SOCIAL_ON || !r || !r.ep) return;
+  try { await sbRpc('push_delete', { p_user: k.user, p_token: nbData().token, p_endpoint: r.ep }); } catch (e) { /* egal */ }
+  r.at = 0; r.user = ''; pushRecSave(r);
+}
+function openMitteilungen() {
+  openSheet((b) => {
+    b.setAttribute('aria-label', 'Mitteilungen');
+    const zur = el('button', { class: 'knopf leise', type: 'button' }, 'Zurück');
+    zur.addEventListener('click', () => openGemeinde());
+    const kopf = el('div', { class: 'blatt-kopf' }, pixelText('Mitteilungen', 3));
+    if (!pushKann()) {
+      const app = istIOS() && !istApp();
+      b.append(kopf, el('p', { class: 'stimmung gross' }, '🔔'),
+        el('p', { class: 'stimmung' }, app ? 'Geht nur in der App vom Home-Bildschirm.' : 'Dieses Gerät kann leider keine Mitteilungen.'),
+        app ? el('p', { class: 'stimmung leise' }, 'In Safari: Teilen → „Zum Home-Bildschirm“. Dann den Garten von dort öffnen.') : '',
+        el('div', { class: 'reihe' }, zur));
+      return;
+    }
+    if (Notification.permission === 'denied') {
+      b.append(kopf, el('p', { class: 'stimmung' }, 'Mitteilungen sind für den Garten ausgeschaltet. Du kannst sie in den Einstellungen deines Geräts wieder erlauben.'),
+        el('div', { class: 'reihe' }, zur));
+      return;
+    }
+    const r = pushRec();
+    if (Notification.permission !== 'granted' || !r || !r.ep) {
+      const ja = el('button', { class: 'knopf haupt', type: 'button' }, 'Mitteilungen erlauben');
+      ja.addEventListener('click', async () => {
+        if (ja.disabled) return; ja.disabled = true;
+        try {
+          const erlaubt = await Notification.requestPermission(); // im selben Tipp
+          if (erlaubt !== 'granted') { openMitteilungen(); return; }
+          const sub = await pushAbo(true);
+          await pushSpeichern(sub, { herzen: true, giessen: true, fotos: true });
+          toast('Mitteilungen sind an.');
+          openMitteilungen();
+        } catch (e) {
+          ja.disabled = false;
+          if (e.code === '42501') kontoLost(); else toast('Das hat nicht geklappt. Versuch es gleich nochmal.');
+        }
+      });
+      b.append(kopf, el('p', { class: 'stimmung gross' }, '🔔'),
+        el('p', { class: 'stimmung' }, 'Bekomm Bescheid bei Herzen und Kommentaren, abends eine Gieß-Erinnerung und wenn jemand ein Foto macht.'),
+        el('div', { class: 'reihe' }, ja), el('div', { class: 'reihe' }, zur));
+      return;
+    }
+    const prefs = Object.assign({ herzen: true, giessen: true, fotos: true }, r.prefs || {});
+    const schalter = PUSH_ARTEN.map(([key, text]) => {
+      const pill = el('span', { class: 'schalter-pill' });
+      const s = el('button', { class: 'schalter', type: 'button', role: 'switch' }, el('span', null, text), pill);
+      const zeig = () => { s.setAttribute('aria-checked', String(prefs[key] !== false)); pill.textContent = prefs[key] !== false ? 'an' : 'aus'; };
+      s.addEventListener('click', async () => {
+        if (s.disabled) return;
+        const alt = prefs[key] !== false;
+        prefs[key] = !alt; zeig(); s.disabled = true;
+        try { await pushSpeichern(await pushAbo(true), Object.assign({}, prefs)); }
+        catch (e) { prefs[key] = alt; zeig(); if (e.code === '42501') kontoLost(); else toast('Hat nicht geklappt. Versuch es gleich nochmal.'); }
+        s.disabled = false;
+      });
+      zeig();
+      return s;
+    });
+    b.append(kopf, ...schalter, el('div', { class: 'reihe' }, zur));
+  });
+}
+
 /* ---------- Kleines Polaroid an der Pflanze ---------- */
 function fotoPin(s, f) {
   const p = s.p;
@@ -4011,6 +4334,8 @@ function fotoPin(s, f) {
   if (f.t) b.append(el('img', { src: f.t, alt: '', width: '20', height: '20' }));
   else b.classList.add('ohne-bild');
   if (f.d < today()) b.classList.add('aelter');
+  const soz = socialKey(p, f), sc = soz && socialCache.get(soz.key);
+  if (sc && sc.herz) b.append(el('span', { class: 'pin-herz', 'aria-hidden': 'true' }, '❤'));
   b.style.left = (s.cx + 11) * PX + 'px';
   b.style.top = (s.base - 9) * PX + 'px';
   b.style.setProperty('--dreh', ((hashStr(p.id) % 2 ? 1 : -1) * (5 + hashStr(p.id) % 5)) + 'deg');
@@ -4123,7 +4448,7 @@ function init() {
   $('szene').append(nachweis);
   document.body.append(fotoInput);
   setupNeighborhood();
-  loadFotos().then(() => { renderLabels(); if (sharing()) syncFotos(); });
+  loadFotos().then(() => { renderLabels(); if (sharing()) syncFotos(); if (fotoWartet) oeffneFotoWartend(); else socialRefresh(); });
 
   let lastDay = today(), lastMin = -1;
   setInterval(() => {
@@ -4150,6 +4475,14 @@ function init() {
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     addEventListener('load', () => navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {}));
     // Neue Version installiert -> einmal neu laden, damit sie sofort da ist (nicht erst beim nächsten Öffnen)
+    // 2.1: Mitteilung angetippt, App war schon offen -> direkt zum Foto
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      const d = e.data;
+      if (d && d.type === 'garten-oeffnen' && typeof d.url === 'string') {
+        try { fotoWartet = fotoAusUrl(new URL(d.url, location.href).searchParams.get('foto')); } catch (x) { fotoWartet = null; }
+        if (fotoWartet) oeffneFotoWartend();
+      }
+    });
     const hatteSW = !!navigator.serviceWorker.controller;
     let neuGeladen = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
@@ -4176,7 +4509,10 @@ window.garten = {
   // Fotos (1.3)
   _fakeFoto: fakeFoto, _fotoInfo: () => lastFotoInfo, _syncFotos: () => syncFotos(),
   _fotos: () => [...fotoIdx.values()].map((m) => ({ plant: m.plant, day: m.day, mime: m.mime, size: m.size, thumb: m.thumb.length, synced: m.synced, local: m.local })),
-  _openFoto: (id) => { const p = vPlants().find((x) => x.id === id); if (p) openFoto(p); }
+  _openFoto: (id) => { const p = vPlants().find((x) => x.id === id); if (p) openFoto(p); },
+  // 2.1
+  _social: () => Object.fromEntries(socialCache), _socialRefresh: () => { socialAt.clear(); return socialRefresh(); },
+  _push: () => pushRec()
 };
 init();
 })();
