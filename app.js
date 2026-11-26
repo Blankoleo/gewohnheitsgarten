@@ -1,4 +1,4 @@
-/* Gewohnheits-Garten 2.2 „Fair“
+/* Gewohnheits-Garten 2.3 „Stabil“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage (+ Konto in Supabase).
@@ -9,6 +9,9 @@
    2.2: Fotos versteckter Gewohnheiten bleiben auf dem Gerät; Rhythmuswechsel gilt ab Montag (p.nextGoal),
    kleiner Bonus für häufige Rhythmen; Garten-Pflege pro Gießen = gain/n; Pause höchstens 14 Tage
    (p.pauseEnd); Tageswechsel um 3 Uhr nachts; Foto beim Gießen pro Gewohnheit abschaltbar (p.mitFoto).
+   2.3: Konten führen ohne Verluste zusammen (gelöschte Pflanzen privat.weg, Einstellungen mit p.ts, Zuwächse
+   statt Maximum); Pause frühestens 7 Tage nach der letzten (p.pauseOff), Pausieren rettet keine welke Pflanze;
+   neuer Rhythmus startet frisch; Fotos nur mit Konto (get_photo2); Gemeinde holt nur Änderungen (community_changes).
 
    Debug (versteckt):
      ?tag=+3      simuliert 3 Tage später (auch ?tag=-1)
@@ -26,7 +29,7 @@
 'use strict';
 (function () {
 
-const VERSION = '2.2.4';
+const VERSION = '2.3';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -135,12 +138,23 @@ function migratePlant(p) {
 const PAUSE_MAX = 14;
 function tickPlant(p, t = today()) {
   let ch = false;
-  if (p.nextGoal != null && t >= p.nextFrom) { p.goal = p.nextGoal; delete p.nextGoal; delete p.nextFrom; ch = true; }
+  if (p.nextGoal != null && t >= p.nextFrom) {
+    // 2.3: neuer Rhythmus startet frisch am Montag (sonst welkt sie rückwirkend nach dem neuen Takt)
+    if (isFinite(p.nextFrom)) p.resumeDay = Math.max(p.resumeDay != null ? p.resumeDay : -Infinity, p.nextFrom);
+    p.goal = p.nextGoal; delete p.nextGoal; delete p.nextFrom; ch = true;
+  }
   if (p.paused != null) {
     if (!isFinite(p.pauseEnd)) { p.pauseEnd = Math.max(p.paused + PAUSE_MAX, t); ch = true; } // Pause von vor 2.2: läuft sanft aus
-    if (t >= p.pauseEnd) { p.paused = null; p.resumeDay = p.pauseEnd; delete p.pauseEnd; ch = true; } // kein Welk-Malus für die Pause
+    if (t >= p.pauseEnd) { endPause(p, p.pauseEnd); ch = true; } // kein Welk-Malus für die Pause
   } else if (p.pauseEnd !== undefined) { delete p.pauseEnd; ch = true; }
   return ch;
+}
+/** 2.3: Pause beenden – die Pausentage zählen nicht, aber eine welke Pflanze wird dadurch auch nicht gratis frisch. */
+function endPause(p, t) {
+  const back = Math.min(t, refDay(p) + Math.max(0, t - p.paused) + 1);
+  p.paused = null; delete p.pauseEnd;
+  p.resumeDay = Math.max(p.resumeDay != null ? p.resumeDay : -Infinity, back);
+  if (!p.nb) p.pauseOff = t; // neue Pause erst 7 Tage später
 }
 function tickAll(t = today()) { let ch = false; for (const p of state.garden.plants) if (tickPlant(p, t)) ch = true; return ch; }
 function loadState() {
@@ -283,7 +297,7 @@ function water(p, t = today()) {
   p.lastWatered = t;
   p.days.push(t);
   p.days = p.days.filter((d) => d > t - 63);
-  state.garden.xp += gain / Math.max(1, state.garden.plants.length); // 2.2: Pflege-Anteil statt Pflanzenzahl
+  state.garden.xp += gain / Math.max(1, state.garden.plants.filter((x) => x.paused == null).length); // 2.3: Anteil der wachen Pflanzen
   const lvAfter = levelOfXp(state.garden.xp);
   return {
     revived: c0 === 2, drooped: c0 === 1, loss, bonus,
@@ -2083,6 +2097,7 @@ function celebrate(L) {
 /* ------------------------------------------------------------------ Gießen */
 const LOB = ['Schön gegossen.', 'Ein guter Schluck.', 'Das tat gut.', 'Tropfen für Tropfen.', 'Sie streckt sich ein bisschen.', 'Ganz in Ruhe. Gut gemacht.'];
 function giessen(p) {
+  if (torOffen()) return;
   const t = today();
   if (wateredToday(p, t)) { toast(`${nameOf(p)} ist heute schon gegossen.`); return; }
   const s = slots.find((x) => x.p.id === p.id);
@@ -2233,10 +2248,11 @@ function openLevel() {
 }
 
 let sheetToken = 0;
+const torOffen = () => document.body.classList.contains('tor-offen');
 function openSheet(build) {
+  if (torOffen()) return; // 2.3: solange der Anmeldebildschirm offen ist, keine Blätter
   const tok = ++sheetToken;
   overviewOpen = false; nbConfirming = false;
-  hideNachweis();
   blatt.classList.remove('nachbarschaft', 'foto-blatt');
   blatt.replaceChildren();
   build(blatt);
@@ -2382,7 +2398,7 @@ function openPlant(p) {
       save.addEventListener('click', () => {
         const v = inp.value.trim();
         if (!v) { inp.focus(); return; }
-        state.privat.names[p.id] = v;
+        state.privat.names[p.id] = v; touch(p);
         saveState();
         nameEl.textContent = v;
         updateUI();
@@ -2414,7 +2430,7 @@ function openPlant(p) {
         p.nextGoal = gg; p.nextFrom = weekStart(tt) + 7;
         toast(`${nameOf(p)}: ab Montag ${GOAL_LABEL[gg]}.`);
       }
-      saveState(); renderLand(); updateUI();
+      touch(p); saveState(); renderLand(); updateUI();
       b.querySelector('.woche').textContent = weekText(p, tt);
     }, () => p.species, () => p.nextGoal != null ? `Diese Woche noch ${GOAL_LABEL[p.goal]} · ab Montag: ${GOAL_SHORT[p.nextGoal]}` : '');
     const pz = el('button', { class: 'knopf pause-knopf', type: 'button' }, p.paused != null ? 'Pause beenden' : 'Pause (höchstens 14 Tage)');
@@ -2442,7 +2458,7 @@ function openPlant(p) {
     let auge = '';
     if (NB_ON) {
       auge = schalter('👁 Für die Gemeinde sichtbar', () => state.privat.sichtbar[p.id] === true, (v) => {
-        state.privat.sichtbar[p.id] = v;
+        state.privat.sichtbar[p.id] = v; touch(p);
         fotoSichtbarkeit(p.id); // 2.2: Foto einer versteckten Gewohnheit bleibt privat
         saveState(); scheduleSync(true);
         toast(v ? 'Die Gemeinde sieht jetzt Name und Foto.' : 'Die Gemeinde sieht nur noch die Pflanze. Fotos bleiben bei dir.');
@@ -2451,6 +2467,7 @@ function openPlant(p) {
     // 2.2: Foto beim Gießen – pro Gewohnheit abschaltbar
     const mitFoto = schalter('📸 Foto beim Gießen', () => p.mitFoto !== false, (v) => {
       if (v) delete p.mitFoto; else p.mitFoto = false;
+      touch(p);
       saveState();
       toast(v ? 'Gegossen wird mit Foto.' : 'Gegossen wird mit einem Tipp, ohne Foto.');
     });
@@ -2468,15 +2485,20 @@ function schalter(text, get, set) {
   return btn;
 }
 
+/** 2.3: frühester Tag für die nächste Pause (7 Tage nach dem Ende der letzten) */
+const pauseAb = (p) => (isFinite(p.pauseOff) ? p.pauseOff + 7 : -Infinity);
 function togglePause(p) {
   const t = today();
   if (p.paused != null) {
-    p.paused = null; p.resumeDay = t; delete p.pauseEnd;
+    endPause(p, t);
     toast(`${nameOf(p)} ist wieder wach.`);
   } else {
+    const ab = pauseAb(p);
+    if (t < ab) { toast(`Nächste Pause erst in ${ab - t === 1 ? '1 Tag' : (ab - t) + ' Tagen'} möglich.`); return; }
     p.paused = t; p.pauseEnd = t + PAUSE_MAX;
     toast(`${nameOf(p)} macht bis zu 14 Tage Pause und welkt nicht.`);
   }
+  touch(p);
   saveState();
   renderLand(); updateUI();
 }
@@ -2497,6 +2519,7 @@ function addPlant(name, sp, goal, mitFoto = true) {
 }
 function removePlant(p) {
   state.garden.plants = state.garden.plants.filter((x) => x.id !== p.id);
+  wegMerken(state.privat, p.id); // 2.3: damit ein anderes Gerät sie nicht zurückbringt
   delete state.privat.names[p.id];
   delete state.privat.sichtbar[p.id];
   if (fotoIdx.has(p.id)) deleteFoto(p);
@@ -2550,8 +2573,8 @@ function renderDebug() {
     mk('+1', () => setDebug(dayOffset + 1, hourOverride)),
     mk('+7', () => setDebug(dayOffset + 7, hourOverride)),
     el('span', null, ` Zeit ${hourOverride == null ? 'echt' : hourOverride.toFixed(1).replace('.', ',')}`),
-    mk('−3h', () => setDebug(dayOffset, ((hourOverride == null ? currentHour() : hourOverride) - 3 + 24) % 24)),
-    mk('+3h', () => setDebug(dayOffset, ((hourOverride == null ? currentHour() : hourOverride) + 3) % 24)),
+    mk('−3h', () => shiftHours(-3)),
+    mk('+3h', () => shiftHours(3)),
     mk('echt', () => { levelOverride = null; setDebug(0, null); }),
     el('span', null, ` Stufe ${L}${levelOverride != null ? '*' : ''}`),
     mk('−', () => setLevelOverride(Math.max(0, L - 1))),
@@ -2561,6 +2584,11 @@ function renderDebug() {
     mk('Ereignis', debugEvent),
     view ? '' : mk('📸', () => fakeFoto())
   );
+}
+/** Debug: Uhr um ±h verstellen – über Mitternacht wechselt auch der Kalendertag. */
+function shiftHours(dh) {
+  const h = (hourOverride == null ? currentHour() : hourOverride) + dh;
+  setDebug(dayOffset + Math.floor(h / 24), ((h % 24) + 24) % 24);
 }
 function setLevelOverride(L) {
   levelOverride = L;
@@ -2618,7 +2646,7 @@ const SB_KEY = String(CFG.supabaseAnonKey || '').trim();
 const NB_ON = MOCK || !!(SB_URL && SB_KEY);
 const SOCIAL_ON = NB_ON && !MOCK; // 2.1 Herzen/Kommentare/Mitteilungen nur mit echtem Backend
 const VAPID_KEY = String(CFG.vapidPublicKey || '').trim();
-const NB_MAX = 40, POLL_MS = 25000, SYNC_GAP = 10000, SNAP_MAX = 20000, NAME_MAX = 40;
+const NB_MAX = 40, POLL_MS = 25000, POLL_BG_MS = 60000, POLL_VOLL_MS = 600000, SYNC_GAP = 10000, SNAP_MAX = 20000, NAME_MAX = 40;
 const MOCK_DB = 'gewohnheitsgarten.mock-db';
 const CACHE_KEY = STORE + '.gemeinde';
 const MOCK_CODE = 'mock-code'; // nur im Mock-Modus; der echte Gemeinde-Code steht nur in Supabase
@@ -2719,6 +2747,13 @@ const backend = {
     const rows = await sbRpc('community_gardens', { p_user: user, p_token: token });
     return Array.isArray(rows) ? rows : [];
   },
+  /** 2.3: nur Änderungen seit `since` (Server-Zeit) -> { now, ids, gardens, voll } */
+  async changes(user, token, since) {
+    if (MOCK) return { now: null, ids: null, gardens: await backend.community(user, token), voll: true };
+    const r = await sbRpc('community_changes', { p_user: user, p_token: token, p_since: since || null });
+    if (!r || !Array.isArray(r.ids) || !Array.isArray(r.gardens)) throw new Error('antwort');
+    return { now: typeof r.now === 'string' ? r.now : null, ids: r.ids, gardens: r.gardens, voll: !since };
+  },
   /** 2.0: Gemeinde-Code zum Weitergeben (nur für Mitglieder) */
   async code(user, token) {
     if (MOCK) { await mockWait(); mockTokCheck(mockKonten()[user], token); return MOCK_CODE; }
@@ -2764,7 +2799,9 @@ const backend = {
       const r = (mockFotos()[gid] || {})[pid];
       return r && fotoFresh(r.day) ? { mime: r.mime, data: r.data, day: r.day } : null;
     }
-    const rows = await sbRpc('get_photo', { p_garden: gid, p_plant: pid });
+    const k = konto(); // 2.3: Fotos nur noch mit Konto (get_photo2)
+    if (!k) return null;
+    const rows = await sbRpc('get_photo2', { p_user: k.user, p_token: nbData().token, p_garden: gid, p_plant: pid });
     const r = Array.isArray(rows) ? rows[0] : rows;
     return r && r.data ? { mime: r.mime, data: r.data, day: dayOfIso(r.taken_on) } : null;
   }
@@ -2772,8 +2809,9 @@ const backend = {
 
 /* ---------- Hochladen: gedrosselt, nur bei Änderung, offline später ---------- */
 let syncTimer = 0, syncBusy = false, syncAgain = false, lastSyncAt = 0, syncHintShown = false;
-/** Größe so, wie Postgres sie prüft: jsonb::text setzt nach jedem „:“ und „,“ ein Leerzeichen. */
-const snapSize = (json) => json.length + (json.match(/[:,]/g) || []).length;
+/** Größe so, wie Postgres sie prüft: Bytes (UTF-8), und jsonb::text setzt nach jedem „:“ und „,“ ein Leerzeichen. */
+const utf8 = new TextEncoder();
+const snapSize = (json) => utf8.encode(json).length + (json.match(/[:,]/g) || []).length;
 function snapshotForUpload() {
   const snap = gardenSnapshot();
   let json = JSON.stringify(snap);
@@ -2783,7 +2821,7 @@ function snapshotForUpload() {
   }
   if (snapSize(json) > SNAP_MAX) { // sehr großer Garten: Wochenrohdaten kürzen, dann Pflanzen begrenzen
     const w0 = weekStart(today());
-    snap.plants.forEach((p) => { p.days = p.days.filter((d) => d >= w0); if (!p.foto) delete p.id; });
+    snap.plants.forEach((p) => { p.days = p.days.filter((d) => d >= w0); delete p.name; }); // 2.3: IDs bleiben (Widget, Fotos)
     json = JSON.stringify(snap);
     while (snapSize(json) > SNAP_MAX && snap.plants.length) { snap.plants.pop(); json = JSON.stringify(snap); }
   }
@@ -2827,9 +2865,9 @@ async function syncNow(force) {
    Alle anderen Konten-Gärten kommen von community_gardens (nur mit gültigem Konto-Token). */
 let gemeinde = [];     // Garten-IDs der anderen Konten, in der Reihenfolge vom Server
 let nbCache = {};      // id -> { name, snap, at, loaded, seen }
-let pollTimer = 0, lastPollAt = 0, overviewOpen = false, nbConfirming = false, gemeindeCode = '', codeBusy = false;
+let pollTimer = 0, lastPollAt = 0, pollOkAt = 0, nbSeit = null, nbVollAt = 0, overviewOpen = false, nbConfirming = false, gemeindeCode = '', codeBusy = false;
 function loadCache() {
-  gemeinde = []; nbCache = {};
+  gemeinde = []; nbCache = {}; nbSeit = null;
   try {
     const c = JSON.parse(localStorage.getItem(CACHE_KEY)), k = konto();
     if (k && c && typeof c === 'object' && c.user === k.user && Array.isArray(c.ids) && c.g && typeof c.g === 'object') {
@@ -2842,40 +2880,57 @@ function saveCache() {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ user: konto() ? konto().user : '', ids: gemeinde, g: nbCache })); }
   catch (e) { /* Platz: nicht schlimm */ }
 }
-const pollWanted = () => NB_ON && !!konto() && !document.hidden && (!!view || overviewOpen);
-function schedulePoll(delay = POLL_MS) {
+/* 2.3 sparsam: sichtbar und angemeldet -> alle 60 s, bei offenem Nachbargarten/Übersicht alle 25 s.
+   Abgerufen werden nur Gärten, die sich seit dem letzten Mal geändert haben (community_changes, Server-Zeit);
+   vollständig beim Öffnen, beim Zurückkehren, alle 10 Minuten und nach jedem Fehler. */
+const pollWanted = () => NB_ON && !!konto() && !document.hidden;
+const pollDelay = () => (view || overviewOpen ? POLL_MS : POLL_BG_MS);
+function schedulePoll(delay) {
   clearTimeout(pollTimer);
-  if (pollWanted()) pollTimer = setTimeout(() => pollNow(), delay);
+  if (pollWanted()) pollTimer = setTimeout(() => pollNow(), delay == null ? pollDelay() : delay);
 }
+/** Nächster Abruf vollständig (Öffnen, Zurückkehren, Fehler). */
+function pollVoll() { nbSeit = null; }
+let pollBusy = false;
 async function pollNow(always) {
   clearTimeout(pollTimer);
   const k = konto();
   if (!NB_ON || !k || (!always && !pollWanted())) return;
+  if (pollBusy) return;
+  pollBusy = true;
   lastPollAt = Date.now();
   try {
-    const rows = await backend.community(k.user, nbData().token);
+    let voll = !nbSeit || Date.now() - nbVollAt > POLL_VOLL_MS;
+    let r = await backend.changes(k.user, nbData().token, voll ? null : nbSeit);
     if (konto() !== k) return; // inzwischen abgemeldet
-    const ids = [];
+    let ids = (r.ids || r.gardens.map((g) => g && g.id)).filter((id) => UUID_RE.test(id) && id !== state.garden.id);
+    if (!r.voll && ids.some((id) => !nbCache[id] && !r.gardens.some((g) => g && g.id === id))) { // neues Mitglied mit älterem Garten
+      r = await backend.changes(k.user, nbData().token, null);
+      if (konto() !== k) return;
+      ids = (r.ids || r.gardens.map((g) => g && g.id)).filter((id) => UUID_RE.test(id) && id !== state.garden.id);
+    }
+    ids = [...new Set(ids)].slice(0, NB_MAX);
     let changedView = false, changedAny = false;
-    for (const r of rows) {
-      if (!r || !UUID_RE.test(r.id) || r.id === state.garden.id || ids.includes(r.id)) continue;
-      if (ids.length >= NB_MAX) break;
-      ids.push(r.id);
-      const snap = sanitizeSnap(r.snapshot), old = nbCache[r.id];
-      const name = cleanName(r.name) || 'Garten';
-      if (!old || old.at !== r.updated_at || old.name !== name) {
-        nbCache[r.id] = { name, snap, at: r.updated_at, loaded: Date.now(), seen: old ? old.seen : undefined };
+    for (const g of r.gardens) {
+      if (!g || !ids.includes(g.id)) continue;
+      const snap = sanitizeSnap(g.snapshot), old = nbCache[g.id];
+      const name = cleanName(g.name) || 'Garten';
+      if (!old || old.at !== g.updated_at || old.name !== name) {
+        nbCache[g.id] = { name, snap, at: g.updated_at, loaded: Date.now(), seen: old ? old.seen : undefined };
         changedAny = true;
-        if (view && view.id === r.id) changedView = true;
+        if (view && view.id === g.id) changedView = true;
       }
     }
     for (const id of Object.keys(nbCache)) if (!ids.includes(id)) delete nbCache[id];
     if (ids.join() !== gemeinde.join()) changedAny = true;
-    gemeinde = ids;
-    saveCache();
-    if (view && !ids.includes(view.id)) showGarden(0);
+    gemeinde = ids.filter((id) => nbCache[id]);
+    if (r.voll) nbVollAt = Date.now();
+    nbSeit = r.now || null;
+    pollOkAt = Date.now();
+    if (changedAny) saveCache();
+    if (view && !gemeinde.includes(view.id)) showGarden(0);
     else {
-      if (view) viewIdx = ids.indexOf(view.id) + 1;
+      if (view) viewIdx = gemeinde.indexOf(view.id) + 1;
       if (changedView) { view = buildView(view.id); refresh(); markFotosSeen(); }
       else if (view) updateNeighborUI(); // „zuletzt aktiv“ weiterzählen
       renderNav();
@@ -2883,11 +2938,14 @@ async function pollNow(always) {
     if (changedAny && overviewOpen && !nbConfirming) openGemeinde(); // Übersicht auffrischen
     gemeindeGeladen = true;
     if (fotoWartet) oeffneFotoWartend();
-    else socialRefresh();
+    else if (view) socialRefresh(); // eigener Garten: beim Öffnen/Zurückkehren (wie bisher)
   } catch (e) {
+    pollVoll(); // nächstes Mal vollständig
     if (e.code === '42501') kontoLost();
+  } finally {
+    pollBusy = false;
+    schedulePoll();
   }
-  schedulePoll();
 }
 
 /** Daten aus dem Netz sind fremd: nur bekannte Felder, Zahlen geprüft, Größe begrenzt. */
@@ -2957,7 +3015,6 @@ function showGarden(idx, dir) {
   for (const k of cans) if (!k.done) { k.done = true; pendingVis.delete(k.s.p.id); if (k.msg) toast(k.msg); if (k.res && k.res.levelUp) celebrate(k.res.levelUp); }
   cans.length = 0; drops.length = 0; sparks.length = 0; petals.length = 0; spray.length = 0;
   pendingVis.clear(); wiggle.clear();
-  hideNachweis();
   viewIdx = idx;
   view = ids[idx] ? buildView(ids[idx]) : null;
   document.body.classList.toggle('nachbar-ansicht', !!view);
@@ -3233,7 +3290,7 @@ const kontoName = (s) => String(s == null ? '' : s).trim().toLowerCase();
 /** Was ins Konto geht: alles außer Kontodaten und gerätegebundenen Sync-Merkern. */
 function kontoState() {
   const s = JSON.parse(JSON.stringify(state));
-  delete s.privat.konto; delete s.privat.warKonto;
+  delete s.privat.konto; delete s.privat.warKonto; delete s.privat.kontoBasis;
   if (s.privat.nb) { delete s.privat.nb.sent; delete s.privat.nb.dirty; }
   return s;
 }
@@ -3284,13 +3341,22 @@ const kontoApi = {
 };
 
 /** Stand aus dem Konto übernehmen (ersetzt den lokalen) und alles neu zeichnen. */
-function kontoApply(remote, rev, user) {
+function kontoApply(remote, rev, user, basis) {
   if (!validRemote(remote)) return false;
   remote.privat = remote.privat && typeof remote.privat === 'object' ? remote.privat : { names: {} };
-  remote.privat.konto = { user, rev };
+  delete remote.privat.kontoBasis;
+  remote.privat.konto = { user, rev, basis: basis || kontoBasisOf(remote) };
   try { localStorage.setItem(STORE, JSON.stringify(remote)); } catch (e) { toast('Speichern hat leider nicht geklappt.'); return false; }
+  const alt = new Map(state.garden.plants.map((p) => [p.id, p]));
   state = loadState();
-  if (!state.privat.konto) state.privat.konto = { user, rev };
+  if (!state.privat.konto) state.privat.konto = { user, rev, basis: basis || kontoBasisOf(remote) };
+  // 2.3: dieselben Pflanzen-Objekte weiterverwenden – offene Blätter und laufende Fotos zeigen so auf den neuen Stand
+  state.garden.plants = state.garden.plants.map((np) => {
+    const op = alt.get(np.id);
+    if (!op) return np;
+    for (const k of Object.keys(op)) delete op[k];
+    return Object.assign(op, np);
+  });
   const L = levelOfXp(state.garden.xp); // wie saveState, damit die Signatur gleich bleibt
   state.garden.level = L;
   state.garden.deko = DEKO.filter((d) => d.lv <= L).map((d) => d.id);
@@ -3301,26 +3367,72 @@ function kontoApply(remote, rev, user) {
   renderLabels();
   return true;
 }
-/** Konflikt (anderes Gerät hat inzwischen gespeichert): Der Stand hier ist die jüngste Aktion und gewinnt.
-    Vom Server kommen dazu: Gießtage und Wachstum (vereinigt), dort neu gesetzte Pflanzen, Nachbarn. */
+/* ---------- 2.3: Zusammenführen ohne Verluste ----------
+   * Gelöschte Pflanzen merkt sich privat.weg (ID -> Tag), damit ein anderes Gerät sie nicht zurückbringt.
+   * Einstellungen (Rhythmus, Pause, Foto, Name, Sichtbarkeit) tragen einen Zeitstempel p.ts – die neuere gewinnt.
+   * Wachstum und Pflege werden über Zuwächse seit dem letzten gemeinsamen Stand (konto.basis) addiert, nicht max. */
+const EINSTELLUNGEN = ['goal', 'nextGoal', 'nextFrom', 'paused', 'pauseEnd', 'pauseOff', 'mitFoto'];
+const obj = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? o : {});
+function touch(p) { p.ts = Date.now(); }
+function wegListe(w, t = today()) {
+  const e = Object.entries(obj(w)).filter(([k, d]) => k && typeof d === 'number' && d > t - 365).sort((x, y) => y[1] - x[1]).slice(0, 200);
+  return Object.fromEntries(e);
+}
+function wegMerken(pv, id) { const w = obj(pv.weg); w[id] = today(); pv.weg = wegListe(w); }
+/** Was der Server hat (pro Pflanze Wachstum + letzter Gießtag, dazu die Pflege) – Grundlage für Zuwächse. */
+function kontoBasisOf(st) {
+  if (!validRemote(st)) return null;
+  const b = { xp: Number(st.garden.xp) || 0, p: {} };
+  for (const p of st.garden.plants) if (p && p.id) b.p[p.id] = [Number(p.growth) || 0, p.lastWatered != null ? p.lastWatered : null];
+  return b;
+}
+/** prim bleibt Grundlage (ID, Token, Reihenfolge); von sek kommen neue Pflanzen, Gießtage, Zuwächse, neuere Einstellungen. */
+function gartenMerge(prim, sek, basis) {
+  const pp = prim.privat = obj(prim.privat);
+  pp.names = obj(pp.names); pp.sichtbar = obj(pp.sichtbar);
+  const sp = obj(sek.privat), snames = obj(sp.names), ssicht = obj(sp.sichtbar);
+  const weg = pp.weg = wegListe(Object.assign({}, obj(sp.weg), obj(pp.weg)));
+  prim.garden.plants = prim.garden.plants.filter((p) => p && !(p.id in weg));
+  const byId = new Map(prim.garden.plants.map((p) => [p.id, p]));
+  const bp = basis && obj(basis.p);
+  let neu = 0;
+  for (const op of sek.garden.plants) {
+    if (!op || !op.id || op.id in weg) continue;
+    const p = byId.get(op.id);
+    if (!p) {
+      prim.garden.plants.push(op); neu++;
+      if (snames[op.id] && !pp.names[op.id]) pp.names[op.id] = snames[op.id];
+      if (!(op.id in pp.sichtbar)) pp.sichtbar[op.id] = ssicht[op.id] === true;
+      continue;
+    }
+    const pd = Array.isArray(p.days) ? p.days : [], od = Array.isArray(op.days) ? op.days : [];
+    const b = bp && Array.isArray(bp[op.id]) ? bp[op.id] : null;
+    const neuSeit = (days) => days.filter((d) => !b || b[1] == null || d > b[1]);
+    const pn = neuSeit(pd), on = neuSeit(od);
+    const doppelt = pn.some((d) => on.includes(d)); // am selben Tag auf beiden Geräten gegossen
+    const g1 = Number(p.growth) || 0, g2 = Number(op.growth) || 0;
+    p.growth = b && !doppelt ? Math.max(0, g1 + g2 - b[0]) : Math.max(g1, g2);
+    p.days = [...new Set([...pd, ...od])].sort((x, y) => x - y);
+    if (op.lastWatered != null && (p.lastWatered == null || op.lastWatered > p.lastWatered)) p.lastWatered = op.lastWatered;
+    if (op.resumeDay != null && (p.resumeDay == null || op.resumeDay > p.resumeDay)) p.resumeDay = op.resumeDay;
+    if ((Number(op.ts) || 0) > (Number(p.ts) || 0)) {
+      for (const k of EINSTELLUNGEN) { if (k in op) p[k] = op[k]; else delete p[k]; }
+      p.ts = op.ts;
+      if (snames[op.id]) pp.names[op.id] = snames[op.id];
+      if (typeof ssicht[op.id] === 'boolean') pp.sichtbar[op.id] = ssicht[op.id];
+    } else if (!pp.names[op.id] && snames[op.id]) pp.names[op.id] = snames[op.id];
+  }
+  const x1 = Number(prim.garden.xp) || 0, x2 = Number(sek.garden.xp) || 0;
+  prim.garden.xp = basis && isFinite(basis.xp) ? Math.max(x1, x2, x1 + x2 - basis.xp) : Math.max(x1, x2);
+  return neu;
+}
+/** Konflikt (anderes Gerät hat inzwischen gespeichert): Der Stand hier ist Grundlage, vom Server kommt alles dazu. */
 function kontoMerge(remote) {
   const loc = kontoState();
   if (!validRemote(remote)) return loc;
-  const rpv = remote.privat || {}, rnames = rpv.names || {};
-  const byId = new Map(loc.garden.plants.map((p) => [p.id, p]));
-  for (const rp of remote.garden.plants) {
-    const lp = byId.get(rp.id);
-    if (!lp) {
-      loc.garden.plants.push(rp);
-      if (rnames[rp.id] && !loc.privat.names[rp.id]) loc.privat.names[rp.id] = rnames[rp.id];
-      if (rpv.sichtbar && typeof rpv.sichtbar[rp.id] === 'boolean' && loc.privat.sichtbar && !(rp.id in loc.privat.sichtbar)) loc.privat.sichtbar[rp.id] = rpv.sichtbar[rp.id];
-      continue;
-    }
-    lp.days = [...new Set([...(lp.days || []), ...(rp.days || [])])].sort((x, y) => x - y);
-    if (rp.lastWatered != null && (lp.lastWatered == null || rp.lastWatered > lp.lastWatered)) lp.lastWatered = rp.lastWatered;
-    lp.growth = Math.max(lp.growth || 0, rp.growth || 0);
-  }
-  loc.garden.xp = Math.max(loc.garden.xp || 0, remote.garden.xp || 0);
+  const k = konto();
+  gartenMerge(loc, JSON.parse(JSON.stringify(remote)), k && k.basis);
+  const rpv = obj(remote.privat);
   const ln = loc.privat.nb, rn = rpv.nb;
   if (ln && rn && Array.isArray(rn.list)) {
     ln.list = Array.isArray(ln.list) ? ln.list : [];
@@ -3332,6 +3444,7 @@ function kontoLost() {
   const k = konto();
   if (!k) return;
   state.privat.warKonto = k.user;
+  if (k.basis) state.privat.kontoBasis = { user: k.user, b: k.basis }; // 2.3: für das Zusammenführen beim nächsten Anmelden
   delete state.privat.konto;
   persistQuiet();
   gemeinde = []; nbCache = {}; gemeindeCode = '';
@@ -3354,9 +3467,9 @@ async function kontoSave() {
   try {
     const r = await kontoApi.save(k.user, st.privat.nb.token, st, k.rev);
     if (r && r.conflict) {
-      if (kontoApply(kontoMerge(r.state), r.rev, k.user)) { konto().sig = ''; kontoAgain = true; }
+      if (kontoApply(kontoMerge(r.state), r.rev, k.user, kontoBasisOf(r.state))) { konto().sig = ''; kontoAgain = true; }
     } else if (r && r.ok && konto()) {
-      konto().rev = r.rev; konto().sig = sig;
+      konto().rev = r.rev; konto().sig = sig; konto().basis = kontoBasisOf(st);
       persistQuiet();
     }
   } catch (e) {
@@ -3376,7 +3489,7 @@ async function kontoPull() {
     const r = await kontoApi.pull(k.user, nbData().token, k.rev);
     if (r && r.ok && r.state && r.rev > k.rev) {
       const dirty = kontoSig(kontoState()) !== k.sig;
-      if (kontoApply(dirty ? kontoMerge(r.state) : r.state, r.rev, k.user) && dirty) { konto().sig = ''; again = true; }
+      if (kontoApply(dirty ? kontoMerge(r.state) : r.state, r.rev, k.user, kontoBasisOf(r.state)) && dirty) { konto().sig = ''; again = true; }
     }
   } catch (e) {
     if (e.code === '42501') kontoLost();
@@ -3399,6 +3512,7 @@ function kontoFehler(e, r) {
   if (r && r.error === 'gesperrt') return `Zu viele Fehlversuche. Bitte in ${Math.max(1, Math.ceil((r.wait || 300) / 60))} Min. nochmal.`;
   if (r && r.error === 'falsch') return 'Name oder Passwort stimmt nicht.';
   if (e && e.code === 'GG002') return 'Der Gemeinde-Code stimmt nicht.';
+  if (e && e.code === 'GG003') return 'Gerade zu viele falsche Codes. Bitte in einer Stunde nochmal.';
   if (e && e.code === 'GG001') return 'Diesen Namen gibt es schon. Bitte nimm einen anderen.';
   if (e && e.status) return 'Das hat nicht geklappt. Bitte prüf deine Eingaben.';
   return 'Keine Verbindung. Bitte später nochmal versuchen.';
@@ -3426,7 +3540,7 @@ function showTor(mode) {
   };
   const form = el('form', { class: 'konto-form', autocomplete: 'on' });
   const name = el('input', { class: 'feld', type: 'text', name: 'username', maxlength: '24', placeholder: 'Name, z. B. leo', autocomplete: 'username', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', 'aria-label': 'Name' });
-  const pw = el('input', { class: 'feld', type: 'password', name: 'password', maxlength: '72', placeholder: neu ? 'Passwort (mind. 6 Zeichen)' : 'Passwort', autocomplete: neu ? 'new-password' : 'current-password', 'aria-label': 'Passwort' });
+  const pw = el('input', { class: 'feld', type: 'password', name: 'password', maxlength: '72', placeholder: neu ? 'Passwort (mind. 8 Zeichen)' : 'Passwort', autocomplete: neu ? 'new-password' : 'current-password', 'aria-label': 'Passwort' });
   const pw2 = neu ? el('input', { class: 'feld', type: 'password', maxlength: '72', placeholder: 'Passwort wiederholen', autocomplete: 'new-password', 'aria-label': 'Passwort wiederholen' }) : null;
   const code = neu ? el('input', { class: 'feld', type: 'text', maxlength: '64', placeholder: 'Gemeinde-Code', autocomplete: 'off', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', 'aria-label': 'Gemeinde-Code' }) : null;
   const fehler = el('p', { class: 'konto-fehler', role: 'alert' });
@@ -3437,7 +3551,7 @@ function showTor(mode) {
     if (ok.disabled) return;
     const u = kontoName(name.value), p = pw.value;
     if (!KONTO_RE.test(u)) return wackel(name, 'Name: 3–24 Zeichen, nur Buchstaben, Ziffern und . _ -');
-    if (p.length < 6) return wackel(pw, 'Das Passwort braucht mindestens 6 Zeichen.');
+    if (p.length < (neu ? 8 : 6)) return wackel(pw, `Das Passwort braucht mindestens ${neu ? 8 : 6} Zeichen.`);
     if (neu && pw2.value !== p) return wackel(pw2, 'Die beiden Passwörter sind nicht gleich.');
     const c = neu ? code.value.trim().toLowerCase() : '';
     if (neu && !c) return wackel(code, 'Den Code bekommst du von jemandem aus der Gemeinde.');
@@ -3445,15 +3559,27 @@ function showTor(mode) {
     ok.disabled = true; ok.textContent = 'Einen Moment …';
     try {
       if (neu) {
-        ensureIdentity();
-        const st = kontoState();
+        // 2.3: nach dem Abmelden bekommt ein neues Konto einen neuen, leeren Garten (der alte bleibt im alten Konto)
+        let frisch = null, st;
+        if (state.privat.warKonto) {
+          frisch = freshState();
+          frisch.garden.id = uuid4();
+          frisch.privat.nb = { token: randomToken() };
+          st = JSON.parse(JSON.stringify(frisch));
+        } else { ensureIdentity(); st = kontoState(); }
         const r = await kontoApi.register(u, p, st, c);
-        delete state.privat.warKonto;
-        state.privat.konto = { user: (r && r.user) || u, rev: (r && r.rev) || 1, sig: kontoSig(st) };
+        if (frisch) {
+          try { localStorage.setItem(STORE + '.vorher', JSON.stringify(state)); } catch (e) { /* Platz */ }
+          state = frisch;
+          purgeFotos();
+          refresh();
+        }
+        delete state.privat.warKonto; delete state.privat.kontoBasis;
+        state.privat.konto = { user: (r && r.user) || u, rev: (r && r.rev) || 1, sig: kontoSig(st), basis: kontoBasisOf(st) };
         kontoReady = true;
         saveState();
         hideTor();
-        toast(n ? `Willkommen, ${konto().user}! Dein Garten ist jetzt im Konto.` : `Willkommen in der Gemeinde, ${konto().user}!`);
+        toast(n && !frisch ? `Willkommen, ${konto().user}! Dein Garten ist jetzt im Konto.` : `Willkommen in der Gemeinde, ${konto().user}!`);
       } else {
         const r = await kontoApi.login(u, p);
         if (!r || !r.ok || !validRemote(r.state)) { ok.disabled = false; ok.textContent = 'Anmelden'; fehler.textContent = kontoFehler(null, r || { error: 'falsch' }); return; }
@@ -3471,7 +3597,8 @@ function showTor(mode) {
   const kopfSc = innerWidth < 400 ? 2 : 3;
   torEl.replaceChildren(el('div', { class: 'tor-karte' },
     el('div', { class: 'blatt-kopf' }, pixelText('Gewohnheits-Garten', kopfSc)),
-    el('p', { class: 'stimmung' }, n ? `Dein Garten mit ${n} ${n === 1 ? 'Pflanze' : 'Pflanzen'} wartet – es bleibt alles da.` : 'Melde dich an, dann geht’s in deinen Garten.'),
+    el('p', { class: 'stimmung' }, neu && state.privat.warKonto ? 'Ein neues Konto bekommt einen neuen Garten. Dein bisheriger bleibt in deinem alten Konto.'
+      : n ? `Dein Garten mit ${n} ${n === 1 ? 'Pflanze' : 'Pflanzen'} wartet – es bleibt alles da.` : 'Melde dich an, dann geht’s in deinen Garten.'),
     el('div', { class: 'rhythmen tor-tabs', role: 'group', 'aria-label': 'Anmelden oder Konto anlegen' }, tab('an', 'Anmelden'), tab('neu', 'Konto anlegen')),
     form,
     neu ? el('p', { class: 'stimmung leise' }, '⚠ Passwort vergessen heißt Konto weg – gut aufschreiben.') : ''));
@@ -3502,6 +3629,7 @@ async function abmelden() {
   try { await kontoSave(); } catch (e) { /* bleibt lokal */ }
   await pushAbmelden(k);
   state.privat.warKonto = k.user;
+  if (konto() && konto().basis) state.privat.kontoBasis = { user: k.user, b: konto().basis };
   delete state.privat.konto;
   persistQuiet();
   gemeinde = []; nbCache = {}; gemeindeCode = '';
@@ -3519,7 +3647,7 @@ function kontoUebernehmen(user, remote, rev) {
   const fremd = !!state.privat.warKonto && state.privat.warKonto !== user;
   const altId = state.garden.id;
   let ziel = remote, neu = 0, vereint = false;
-  if (mine && !fremd) { const v = kontoVereinen(remote); ziel = v.state; neu = v.neu; vereint = true; }
+  if (mine && !fremd) { const v = kontoVereinen(remote, user); ziel = v.state; neu = v.neu; vereint = true; }
   else if (mine) { try { localStorage.setItem(STORE + '.vorher', JSON.stringify(state)); } catch (e) { /* Platz */ } }
   if (!kontoApply(ziel, rev, user)) return null;
   kontoReady = true;
@@ -3527,31 +3655,16 @@ function kontoUebernehmen(user, remote, rev) {
   if (state.garden.id !== altId) fotosNeuTeilen();
   return { neu };
 }
-const remoteOhneKonto = (r) => { const s = JSON.parse(JSON.stringify(r)); if (s.privat) { delete s.privat.konto; delete s.privat.warKonto; } return s; };
+const remoteOhneKonto = (r) => { const s = JSON.parse(JSON.stringify(r)); if (s.privat) { delete s.privat.konto; delete s.privat.warKonto; delete s.privat.kontoBasis; } return s; };
 /** Konto-Garten + Garten hier: Grundlage ist der Konto-Garten (ID + Token), Pflanzen von hier kommen dazu,
-    gemeinsame Pflanzen bekommen Gießtage und Wachstum von beiden. */
-function kontoVereinen(remote) {
+    gemeinsame Pflanzen bekommen Gießtage, Zuwächse und die neueren Einstellungen (2.3: wie kontoMerge). */
+function kontoVereinen(remote, user) {
   const loc = kontoState(), base = JSON.parse(JSON.stringify(remote));
-  base.privat = base.privat && typeof base.privat === 'object' ? base.privat : {};
-  base.privat.names = base.privat.names && typeof base.privat.names === 'object' ? base.privat.names : {};
+  base.privat = obj(base.privat);
+  base.privat.names = obj(base.privat.names);
   migrateSichtbar(base.privat, base.garden.plants);
-  const lsicht = loc.privat.sichtbar || {};
-  const byId = new Map(base.garden.plants.map((p) => [p && p.id, p]));
-  let neu = 0;
-  for (const lp of loc.garden.plants) {
-    const rp = byId.get(lp.id);
-    if (!rp) {
-      base.garden.plants.push(lp); neu++;
-      if (loc.privat.names[lp.id]) base.privat.names[lp.id] = loc.privat.names[lp.id];
-      base.privat.sichtbar[lp.id] = lsicht[lp.id] === true;
-      continue;
-    }
-    rp.days = [...new Set([...(Array.isArray(rp.days) ? rp.days : []), ...(lp.days || [])])].sort((x, y) => x - y);
-    if (lp.lastWatered != null && (rp.lastWatered == null || lp.lastWatered > rp.lastWatered)) rp.lastWatered = lp.lastWatered;
-    rp.growth = Math.max(rp.growth || 0, lp.growth || 0);
-    if (!base.privat.names[lp.id] && loc.privat.names[lp.id]) base.privat.names[lp.id] = loc.privat.names[lp.id];
-  }
-  base.garden.xp = Math.max(base.garden.xp || 0, loc.garden.xp || 0);
+  const kb = obj(state.privat.kontoBasis);
+  const neu = gartenMerge(base, loc, kb.user === user ? kb.b : null);
   if (loc.privat.fotoHinweis) base.privat.fotoHinweis = true;
   if (!base.privat.nb && loc.privat.nb) base.privat.nb = loc.privat.nb; // ohne Token im Konto: das von hier
   return { state: base, neu };
@@ -3617,11 +3730,12 @@ function setupNeighborhood() {
   ensureIdentity();
   loadCache();
   renderNav();
-  addEventListener('online', () => { if (nbData().dirty) scheduleSync(true); else syncFotos(); if (view || overviewOpen) pollNow(); });
+  addEventListener('online', () => { if (nbData().dirty) scheduleSync(true); else syncFotos(); pollVoll(); pollNow(); });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { clearTimeout(pollTimer); return; }
     if (nbData().dirty) scheduleSync(true); else syncFotos();
-    if (pollWanted()) { if (Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll(); }
+    pollVoll(); // 2.3: beim Zurückkehren vollständig
+    if (pollWanted()) { if (Date.now() - lastPollAt > 15000) pollNow(); else schedulePoll(3000); }
     socialRefresh();
   });
   handleFotoParam();                 // 2.1: aus einer Mitteilung geöffnet (?foto=garten.pflanze)
@@ -3649,7 +3763,7 @@ function houseIcon() {
 }
 
 /* ------------------------------------------------------------------ Foto-Nachweis (1.3)
-   Freiwillig: Beim Gießen (Knopf „📸 Nachweis?“) oder im Detail-Blatt ein kleines Foto machen.
+   Freiwillig: Beim Gießen (Foto-Pflicht, seit 1.5.1) oder im Detail-Blatt ein kleines Foto machen.
    Das Bild wird im Browser verkleinert (≤ 640 px, WebP/JPEG, Ziel ≤ 60 KB) und bekommt den Lofi-Look
    des Gartens: warmer Farbstich, etwas Körnung, leichte Vignette. Dazu ein Mini-Bild (48 px, ≤ 2 KB).
    Lokal: IndexedDB (nie localStorage), pro Pflanze nur das neueste Foto, nach 7 Tagen weg.
@@ -3749,7 +3863,7 @@ async function purgeFotos() {
 }
 function queueFotoDelete(pid) {
   const nb = nbData();
-  nb.fotoDel = (Array.isArray(nb.fotoDel) ? nb.fotoDel : []).filter((x) => x !== pid).concat(pid).slice(-60);
+  nb.fotoDel = (Array.isArray(nb.fotoDel) ? nb.fotoDel : []).filter((x) => x !== pid).concat(pid); // 2.3: nie kappen
 }
 
 /** 2.2: Fotos von Gewohnheiten, die die Gemeinde nicht sieht, bleiben auf dem Gerät. */
@@ -3870,8 +3984,9 @@ let lastTake = Promise.resolve(null);
 fotoInput.addEventListener('change', () => {
   const f = fotoInput.files && fotoInput.files[0], pid = fotoTarget;
   fotoInput.value = '';
-  if (f && pid) lastTake = takeFoto(f, pid);
-  else fotoDannGiessen = null;
+  const giess = !!pid && fotoDannGiessen === pid; // 2.3: gleich hier festhalten – ein zweiter Tipp ändert es nicht mehr
+  fotoDannGiessen = null;
+  if (f && pid) lastTake = takeFoto(f, pid, giess);
 });
 fotoInput.addEventListener('cancel', () => { fotoDannGiessen = null; });
 
@@ -3923,8 +4038,7 @@ function giessMitFoto(p) {
     const los = (gallery) => {
       if (kamera.dataset.done) return; kamera.dataset.done = '1';
       closeSheet();
-      fotoDannGiessen = p.id;
-      fotoStart(p, gallery); // im selben Tipp, sonst blockiert Safari die Kamera
+      fotoStart(p, gallery, true); // im selben Tipp, sonst blockiert Safari die Kamera
     };
     kamera.addEventListener('click', () => los(false));
     galerie.addEventListener('click', () => los(true));
@@ -3938,10 +4052,13 @@ function giessMitFoto(p) {
 }
 
 /** Kamera (oder Galerie) öffnen – beim allerersten geteilten Foto vorher kurz der Datenschutz-Hinweis. */
-function fotoStart(p, gallery) {
-  if (fotoBusy || view) return;
+function fotoStart(p, gallery, giess = false) {
+  fotoDannGiessen = null;
+  if (view) return;
+  if (fotoBusy) { toast('Einen Moment, das Foto wird noch entwickelt.'); return; }
   const go = () => {
     fotoTarget = p.id;
+    fotoDannGiessen = giess ? p.id : null; // 2.3: erst direkt vor dem Öffnen der Kamera
     if (gallery) fotoInput.removeAttribute('capture'); else fotoInput.setAttribute('capture', 'environment');
     fotoInput.value = '';
     fotoInput.click();
@@ -3958,7 +4075,7 @@ function fotoStart(p, gallery) {
         closeSheet();
         go(); // noch im selben Tipp, sonst blockiert der Browser die Kamera
       });
-      ab.addEventListener('click', () => { fotoDannGiessen = null; closeSheet(); });
+      ab.addEventListener('click', closeSheet);
       b.append(el('div', { class: 'blatt-kopf' }, pixelText('Foto', 3)),
         el('p', { class: 'stimmung gross' }, '📸'),
         el('p', { class: 'stimmung' }, 'Die Gemeinde sieht dieses Foto. Nach 7 Tagen wird es gelöscht.'),
@@ -3969,15 +4086,14 @@ function fotoStart(p, gallery) {
   go();
 }
 
-async function takeFoto(file, pid) {
+async function takeFoto(file, pid, giess = false) {
   if (fotoBusy) return null;
-  const p = state.garden.plants.find((x) => x.id === pid);
-  if (!p) return null;
+  if (!state.garden.plants.some((x) => x.id === pid)) return null;
   fotoBusy = true;
-  hideNachweis();
   toast('Foto wird entwickelt …');
   try {
     const f = await makeFoto(file);
+    if (!state.garden.plants.some((x) => x.id === pid)) return null; // inzwischen entfernt
     const privat = fotoPrivat(pid), alt = fotoIdx.get(pid);
     const meta = { plant: pid, day: today(), mime: f.mime, thumb: f.thumb, size: f.data.length, synced: false, local: !sharing() || privat };
     if (privat && alt && alt.synced) queueFotoDelete(pid); // altes geteiltes Foto nicht stehen lassen
@@ -3987,8 +4103,9 @@ async function takeFoto(file, pid) {
     if (!privat && Array.isArray(nb.fotoDel)) nb.fotoDel = nb.fotoDel.filter((x) => x !== pid);
     renderLabels();
     if (sharing()) syncFotos();
-    if (fotoDannGiessen === pid) { // Widget-Ablauf: erst Foto, dann gießen
-      fotoDannGiessen = null;
+    const p = state.garden.plants.find((x) => x.id === pid); // 2.3: frisch per ID (Konto kann inzwischen neu geladen haben)
+    if (!p) return lastFotoInfo;
+    if (giess) { // erst Foto, dann gießen
       giessen(p);
       return lastFotoInfo;
     }
@@ -3996,9 +4113,7 @@ async function takeFoto(file, pid) {
     openFoto(p);
     return lastFotoInfo;
   } catch (e) {
-    const warGiessen = fotoDannGiessen === pid;
-    if (warGiessen) fotoDannGiessen = null;
-    toast(warGiessen ? 'Das Foto hat leider nicht geklappt. Gegossen wird erst mit Foto.' : 'Das Foto hat leider nicht geklappt.');
+    toast(giess ? 'Das Foto hat leider nicht geklappt. Gegossen wird erst mit Foto.' : 'Das Foto hat leider nicht geklappt.');
     return null;
   } finally { fotoBusy = false; }
 }
@@ -4017,7 +4132,7 @@ async function syncFotos() {
   const nb = nbData();
   if (!nb.sent) { scheduleSync(true); return; } // der Garten muss zuerst auf dem Server stehen
   fotoSyncBusy = true;
-  let changed = false;
+  let changed = false, nochmal = false;
   try {
     for (const pid of (Array.isArray(nb.fotoDel) ? nb.fotoDel.slice() : [])) {
       await backend.delFoto(state.garden.id, nb.token, pid);
@@ -4029,7 +4144,13 @@ async function syncFotos() {
       const rec = await fotoBild(pid);
       if (!rec || !rec.data) continue;
       await backend.putFoto(state.garden.id, nb.token, pid, m.day, m.mime, rec.data);
-      if (fotoIdx.get(pid) !== m) continue; // inzwischen ersetzt: nächste Runde
+      // 2.3: während des Hochladens gelöscht oder auf privat geschaltet -> auf dem Server gleich wieder löschen
+      const cur = fotoIdx.get(pid);
+      if (!cur || cur.local || fotoPrivat(pid) || !state.garden.plants.some((x) => x.id === pid)) {
+        queueFotoDelete(pid); changed = true; nochmal = true;
+        continue;
+      }
+      if (cur !== m) continue; // inzwischen ersetzt: nächste Runde
       m.synced = true;
       await fotoPutMeta(m);
       changed = true;
@@ -4039,6 +4160,7 @@ async function syncFotos() {
   } finally {
     fotoSyncBusy = false;
     if (changed) saveState(); // Schnappschuss mit neuen Mini-Bildern teilen
+    if (nochmal) setTimeout(syncFotos, 0);
   }
 }
 
@@ -4305,7 +4427,7 @@ function socialUI(soz, fig) {
 let fotoWartet = null, gemeindeGeladen = false;
 function fotoAusUrl(v) {
   const m = /^([0-9a-f-]{36})\.([A-Za-z0-9-]{1,64})$/i.exec(String(v || ''));
-  return m && UUID_RE.test(m[1]) ? { g: m[1].toLowerCase(), p: m[2] } : null;
+  return m && UUID_RE.test(m[1]) ? { g: m[1].toLowerCase(), p: m[2], seit: Date.now(), tries: 0 } : null;
 }
 function handleFotoParam() {
   if (!params.has('foto')) return;
@@ -4325,8 +4447,17 @@ function oeffneFotoWartend() {
     if (p && fotoOf(p)) openFoto(p);
     return;
   }
+  // 2.3: erst nach einem frischen Abruf öffnen – und erst, wenn der Garten das neue Foto schon zeigt
+  if (pollOkAt < w.seit) { if (!pollBusy) pollNow(true); return; }
   const i = gemeinde.indexOf(w.g);
-  if (i < 0) { if (gemeindeGeladen) fotoWartet = null; return; } // nach dem ersten Laden nochmal
+  if (i < 0) { fotoWartet = null; return; }
+  const pf = nbCache[w.g] && nbCache[w.g].snap.plants.find((x) => x.id === w.p);
+  if (!pf || !pf.foto || pf.foto.d < today() - 1) {
+    if (++w.tries > 4) { fotoWartet = null; return; } // Foto nicht (mehr) da
+    w.seit = Date.now(); // der Garten wird gleich nach dem Foto geteilt: kurz warten, dann nochmal holen
+    setTimeout(() => { if (fotoWartet === w) pollNow(true); }, 8000);
+    return;
+  }
   fotoWartet = null;
   if (!view || view.id !== w.g) showGarden(i + 1, 1);
   const p = view && view.plants.find((x) => x.id === w.p);
@@ -4461,35 +4592,6 @@ function fotoPin(s, f) {
   return b;
 }
 
-/* ---------- „📸 Nachweis?“ nach dem Gießen – dezent, verschwindet von selbst ---------- */
-const nachweis = el('button', { id: 'nachweis', type: 'button', hidden: '' }, '📸 Nachweis?');
-let nachweisTimer = 0, nachweisPlant = null;
-nachweis.addEventListener('click', () => {
-  const p = nachweisPlant;
-  hideNachweis();
-  if (p && state.garden.plants.includes(p)) fotoStart(p, false);
-});
-function showNachweis(p) {
-  if (view || !blatt.hidden || fotoBusy) return;
-  const f = fotoOf(p);
-  if (f && f.d === today()) return; // heute schon ein Foto
-  const s = slots.find((x) => x.p.id === p.id);
-  if (!s) return;
-  nachweisPlant = p;
-  nachweis.style.left = s.cx * PX + 'px';
-  nachweis.style.top = ((s.base + 10) * PX + 34) + 'px';
-  nachweis.hidden = false;
-  nachweis.classList.remove('weg'); void nachweis.offsetWidth; nachweis.classList.add('da');
-  clearTimeout(nachweisTimer);
-  nachweisTimer = setTimeout(hideNachweis, 6000);
-}
-function hideNachweis() {
-  clearTimeout(nachweisTimer);
-  if (nachweis.hidden) return;
-  nachweis.classList.remove('da'); nachweis.classList.add('weg');
-  nachweisTimer = setTimeout(() => { nachweis.hidden = true; nachweisPlant = null; }, 300);
-}
-
 /* ---------- Testhilfe: buntes Bild ohne Kamera ---------- */
 function fakeBild(seed) {
   const R = mulberry32(seed >>> 0);
@@ -4522,7 +4624,7 @@ async function fakeFoto(pid) {
     const dt = new DataTransfer(); dt.items.add(file);
     fotoInput.files = dt.files;
     fotoInput.dispatchEvent(new Event('change'));
-  } catch (e) { lastTake = takeFoto(file, p.id); }
+  } catch (e) { lastTake = takeFoto(file, p.id, fotoDannGiessen === p.id); fotoDannGiessen = null; }
   return lastTake;
 }
 
@@ -4563,7 +4665,6 @@ function init() {
   makeGrain();
   refresh();
   start();
-  $('szene').append(nachweis);
   document.body.append(fotoInput);
   setupNeighborhood();
   loadFotos().then(() => { renderLabels(); if (sharing()) syncFotos(); if (fotoWartet) oeffneFotoWartend(); else socialRefresh(); });
@@ -4603,10 +4704,14 @@ function init() {
     });
     const hatteSW = !!navigator.serviceWorker.controller;
     let neuGeladen = false;
+    // 2.3: nicht mitten im Foto, Blatt, Kommentar oder Anmelden neu laden – warten, bis es ruhig ist
+    const ruhig = () => document.hidden || (blatt.hidden && !fotoBusy
+      && !(document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)));
+    const neuLaden = () => { if (ruhig()) location.reload(); else setTimeout(neuLaden, 1500); };
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (!hatteSW || neuGeladen) return;
       neuGeladen = true;
-      location.reload();
+      neuLaden();
     });
   }
 }

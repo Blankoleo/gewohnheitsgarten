@@ -11,9 +11,10 @@
 --   * Der Code steht NIE im Repo (das ist öffentlich!). Er liegt nur in community:
 --       code_hash  bcrypt-Hash, damit prüft account_register
 --       code       Klartext, damit angemeldete Mitglieder ihn in der App sehen und weitergeben können
---     Code per Dashboard setzen bzw. ändern (SQL Editor, <CODE> ersetzen, NICHT hier speichern):
+--     Code per Dashboard setzen bzw. ändern (SQL Editor, <CODE> ersetzen, NICHT hier speichern).
+--     Klein geschrieben speichern (lower), denn die App und account_register vergleichen klein geschrieben:
 --       insert into public.community (id, code_hash, code)
---       values (1, extensions.crypt('<CODE>', extensions.gen_salt('bf', 8)), '<CODE>')
+--       values (1, extensions.crypt(lower('<CODE>'), extensions.gen_salt('bf', 8)), lower('<CODE>'))
 --       on conflict (id) do update set code_hash = excluded.code_hash, code = excluded.code;
 --   * account_register(p_user, p_pw, p_state, p_code): falscher Code -> errcode GG002, vorher 1 s Pause
 --     (bremst Durchprobieren). Die alte Variante ohne Code (1.6/1.7) wird gelöscht.

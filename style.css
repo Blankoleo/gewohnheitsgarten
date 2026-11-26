@@ -555,26 +555,6 @@ body.nachbar-ansicht #neu { display: none; }
 .foto-pin.ohne-bild { background: #fbf4e8 linear-gradient(#d9c3a6, #b49378) 3px 3px / 20px 20px no-repeat; }
 .foto-pin.aelter { opacity: .82; }
 
-/* „📸 Nachweis?“ – kurz nach dem Gießen */
-#nachweis {
-  position: absolute;
-  z-index: 6;
-  transform: translate(-50%, 0) scale(.9);
-  opacity: 0;
-  border: 0;
-  border-radius: 999px;
-  padding: 6px 12px;
-  font-size: 13px;
-  color: var(--creme);
-  background: rgba(35, 25, 52, .78);
-  box-shadow: 0 2px 0 rgba(20, 12, 30, .35);
-  cursor: pointer;
-  transition: opacity .3s, transform .3s;
-}
-#nachweis[hidden] { display: none; }
-#nachweis.da { opacity: 1; transform: translate(-50%, 0) scale(1); }
-#nachweis.weg { opacity: 0; transform: translate(-50%, 4px) scale(.95); }
-
 /* Detail-Blatt */
 .foto-reihe { align-items: center; }
 .foto-reihe .knopf.foto-knopf { flex: 2 1 0; }
@@ -650,11 +630,12 @@ a.knopf { text-decoration: none; text-align: center; display: inline-flex; align
 
 /* ---------- 2.0 Gemeinde: Tor (Pflicht-Anmeldung), Code, Sichtbarkeits-Schalter ---------- */
 body.tor-offen { overflow: hidden; }
+body.tor-offen #toast { z-index: 43; }
 body.tor-offen .fab, body.tor-offen .fab-nb { visibility: hidden; }
 #tor {
   position: fixed;
   inset: 0;
-  z-index: 25;
+  z-index: 42; /* 2.3: über Blatt und Schleier */
   overflow-y: auto;
   display: flex;
   align-items: center;

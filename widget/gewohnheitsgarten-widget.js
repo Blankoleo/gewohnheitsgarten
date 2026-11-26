@@ -67,15 +67,22 @@ async function fetchGarden(id) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 const CACHE = FileManager.local().joinPath(FileManager.local().documentsDirectory(), 'gewohnheitsgarten-cache.json');
+function readCache(fm, id) {
+  try {
+    if (!fm.fileExists(CACHE)) return null;
+    const g = JSON.parse(fm.readString(CACHE));
+    return g && typeof g === 'object' && String(g.id || '').toLowerCase() === id ? g : null;
+  } catch (e) { return null; } // kaputter Cache: einfach ohne
+}
 async function gardenOrCache(id) {
   const fm = FileManager.local();
-  try {
-    const g = await fetchGarden(id);
-    if (g) fm.writeString(CACHE, JSON.stringify(g));
+  let g = null;
+  try { g = await fetchGarden(id); } catch (e) { g = null; }
+  if (g && g.snapshot) {
+    try { fm.writeString(CACHE, JSON.stringify(g)); } catch (e) { /* egal */ }
     return g;
-  } catch (e) {
-    return fm.fileExists(CACHE) ? JSON.parse(fm.readString(CACHE)) : null;
   }
+  return readCache(fm, id); // Fehler oder leere Antwort: letzter bekannter Stand
 }
 
 /* ---------- Zustand wie in der App berechnen (Stand: heute, nicht vom letzten Hochladen) ---------- */
@@ -87,7 +94,7 @@ const grace = (g) => g >= 7 ? 1 : Math.ceil(7 / g) + 1;
 const wiltSpan = (g) => g >= 7 ? 3 : Math.max(3, Math.ceil(7 / g));
 function status(p0, t) {
   const p = Object.assign({}, p0);
-  if (p.ng && p.nf != null && t >= p.nf) p.goal = p.ng;                    // neuer Rhythmus ab Montag
+  if (p.ng && p.nf != null && t >= p.nf) { p.goal = p.ng; p.resume = Math.max(p.resume != null ? p.resume : -Infinity, p.nf); } // neuer Rhythmus ab Montag, startet frisch
   if (p.paused && p.pe != null && t >= p.pe) { p.paused = false; p.resume = p.pe; } // Pause höchstens 14 Tage
   if (p.paused) return 'pause';
   if (p.last != null && p.last >= t) return 'ok';
