@@ -26,7 +26,7 @@
 'use strict';
 (function () {
 
-const VERSION = '2.2.1';
+const VERSION = '2.2.2';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -2089,6 +2089,7 @@ function giessen(p) {
   const old = { stage: stageOf(p.growth), cond: condition(p, t) };
   const res = water(p);
   if (!res) return;
+  saveState(); // 2.2.2: Gießen sofort speichern (und teilen), nicht erst beim nächsten Anlass
   const name = nameOf(p);
   let msg;
   if (res.grew) msg = res.stage >= 5 ? `${name} wird ${stageName(p.species, res.stage)}!` : `${name} ist gewachsen: ${stageName(p.species, res.stage)}.`;
