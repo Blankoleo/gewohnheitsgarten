@@ -441,6 +441,7 @@ $$;
 
 /* ---------------------------------------------------------------- Gieß-Erinnerung (pg_cron, 19:30 Berlin) */
 -- Durst wie im Widget (status()): nicht Pause, heute nicht gegossen, Wochenziel noch nicht erreicht.
+-- 2.2: Tag wechselt um 3 Uhr nachts; Pause endet bei pe, neuer Rhythmus ng gilt ab nf.
 create or replace function public._push_reminder()
 returns int
 language plpgsql
@@ -449,7 +450,7 @@ set search_path = public, extensions, pg_temp
 as $$
 declare
   v_local timestamp := now() at time zone 'Europe/Berlin';
-  v_t     int := (v_local::date - date '1970-01-01');
+  v_t     int := ((v_local - interval '3 hours')::date - date '1970-01-01');
   v_w0    int;
   v_n     int;
   v_cnt   int := 0;
@@ -472,12 +473,16 @@ begin
   loop
     select count(*) into v_n
     from jsonb_array_elements(case when jsonb_typeof(r.snapshot -> 'plants') = 'array' then r.snapshot -> 'plants' else '[]'::jsonb end) p
-    where coalesce((p ->> 'paused')::boolean, false) = false
+    cross join lateral (select case when jsonb_typeof(p -> 'ng') = 'number' and jsonb_typeof(p -> 'nf') = 'number'
+                                     and (p ->> 'nf')::numeric <= v_t then (p ->> 'ng')::numeric
+                                    else coalesce((p ->> 'goal')::numeric, 7) end as goal) gg
+    where not (coalesce((p ->> 'paused')::boolean, false)
+               and not (jsonb_typeof(p -> 'pe') = 'number' and (p ->> 'pe')::numeric <= v_t))
       and not (jsonb_typeof(p -> 'last') = 'number' and (p ->> 'last')::numeric >= v_t)
-      and not (coalesce((p ->> 'goal')::numeric, 7) < 7
+      and not (gg.goal < 7
                and (select count(*) from jsonb_array_elements(case when jsonb_typeof(p -> 'days') = 'array' then p -> 'days' else '[]'::jsonb end) d
                     where jsonb_typeof(d) = 'number' and d::text::numeric >= v_w0 and d::text::numeric <= v_t)
-                   >= coalesce((p ->> 'goal')::numeric, 7));
+                   >= gg.goal);
     continue when v_n = 0;
     insert into public.push_sent (key) values ('giessen:' || r.username || ':' || v_t) on conflict do nothing;
     continue when not found;

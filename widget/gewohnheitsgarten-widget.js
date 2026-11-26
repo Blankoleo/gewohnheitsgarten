@@ -5,7 +5,7 @@
 //   3. Home-Bildschirm lange drücken → „+“ → Scriptable → Widget hinzufügen → antippen → Script: Garten.
 //   Neue Pflanzen? Einfach Schritt 1–2 wiederholen (oder im Skript ▶ → „Code neu einfügen“).
 // Das Widget gießt nie selbst. Ein Tipp auf eine Pflanze öffnet den Garten,
-// dort wird erst nach einem Foto gegossen.
+// dort wird mit Foto gegossen (oder mit einem Tipp auf „Gießen“, wenn das Foto abgeschaltet ist).
 // Die Namen deiner Gewohnheiten liegen nur hier im Schlüsselbund des iPhones.
 
 const APP = 'https://blankoleo.github.io/gewohnheitsgarten/';
@@ -80,10 +80,15 @@ async function gardenOrCache(id) {
 
 /* ---------- Zustand wie in der App berechnen (Stand: heute, nicht vom letzten Hochladen) ---------- */
 const dayNumber = (d) => Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
+// Wie in der App (2.2): Der Tag wechselt um 3 Uhr nachts.
+const todayNumber = () => { const d = new Date(); return dayNumber(d) - (d.getHours() < 3 ? 1 : 0); };
 const weekday = (t) => ((t + 3) % 7 + 7) % 7;
 const grace = (g) => g >= 7 ? 1 : Math.ceil(7 / g) + 1;
 const wiltSpan = (g) => g >= 7 ? 3 : Math.max(3, Math.ceil(7 / g));
-function status(p, t) {
+function status(p0, t) {
+  const p = Object.assign({}, p0);
+  if (p.ng && p.nf != null && t >= p.nf) p.goal = p.ng;                    // neuer Rhythmus ab Montag
+  if (p.paused && p.pe != null && t >= p.pe) { p.paused = false; p.resume = p.pe; } // Pause höchstens 14 Tage
   if (p.paused) return 'pause';
   if (p.last != null && p.last >= t) return 'ok';
   const w0 = t - weekday(t);
@@ -129,7 +134,7 @@ function message(title, sub) {
 }
 
 function build(cfg, row, family) {
-  const t = dayNumber(new Date());
+  const t = todayNumber();
   const plants = ((row.snapshot && row.snapshot.plants) || []).filter((p) => p && p.id && SPECIES[p.species]);
   if (!plants.length) return message('Noch keine Pflanzen geteilt.', 'Öffne den Garten einmal, dann erscheinen sie hier.');
   const list = plants.map((p) => ({ p, s: status(p, t), name: cfg.names[p.id] || SPECIES[p.species][0] }))

@@ -1,4 +1,4 @@
-/* Gewohnheits-Garten 2.1 „Herzen“
+/* Gewohnheits-Garten 2.2 „Fair“
    Gewohnheiten als Pflanzen: im eigenen Rhythmus gießen, zusehen wie alles wächst –
    und wie der Garten mit der Zeit völlig übertrieben prächtig wird.
    Keine Frameworks, kein Build. Alles in localStorage (+ Konto in Supabase).
@@ -6,6 +6,9 @@
    am Zaun, Sichtbarkeit des Namens pro Gewohnheit (privat.sichtbar).
    2.1: Herzen und kurze Kommentare an Fotos (nur im geöffneten Polaroid), Push-Mitteilungen
    (🏠 → 🔔 Mitteilungen: Herzen & Kommentare, Gieß-Erinnerung, neue Fotos – je Gerät abschaltbar).
+   2.2: Fotos versteckter Gewohnheiten bleiben auf dem Gerät; Rhythmuswechsel gilt ab Montag (p.nextGoal),
+   kleiner Bonus für häufige Rhythmen; Garten-Pflege pro Gießen = gain/n; Pause höchstens 14 Tage
+   (p.pauseEnd); Tageswechsel um 3 Uhr nachts; Foto beim Gießen pro Gewohnheit abschaltbar (p.mitFoto).
 
    Debug (versteckt):
      ?tag=+3      simuliert 3 Tage später (auch ?tag=-1)
@@ -23,7 +26,7 @@
 'use strict';
 (function () {
 
-const VERSION = '2.1';
+const VERSION = '2.2';
 const STORE_KEY = 'gewohnheitsgarten.v1';
 const SW = 40, SH = 50;      // Spritegröße einer Pflanze (Pixel)
 const SLOT = 40;             // Breite eines Beetplatzes (Pixel)
@@ -82,7 +85,12 @@ if (params.has('zeit')) {
   if (isFinite(z)) hourOverride = ((z % 24) + 24) % 24;
 }
 function dayNumber(d) { return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000); }
-function today() { return dayNumber(new Date()) + dayOffset; }
+/** 2.2: Der Tag wechselt um 3 Uhr nachts – Gießen um 1 Uhr zählt noch für den Vortag. */
+const DAY_START = 3;
+function today() {
+  const d = new Date(), h = hourOverride != null ? hourOverride : d.getHours();
+  return dayNumber(d) - (h < DAY_START ? 1 : 0) + dayOffset;
+}
 function currentHour() {
   if (hourOverride != null) return hourOverride;
   const d = new Date();
@@ -120,8 +128,21 @@ function migratePlant(p) {
   if (p.paused === undefined) p.paused = null;
   if (p.resumeDay === undefined) p.resumeDay = null;
   if (!isFinite(p.growth)) p.growth = 0;
+  if (p.nextGoal != null && !GOALS.includes(p.nextGoal)) { delete p.nextGoal; delete p.nextFrom; }
   return p;
 }
+/** 2.2: Rhythmuswechsel ab Montag übernehmen, Pausen nach 14 Tagen beenden. true = etwas geändert. */
+const PAUSE_MAX = 14;
+function tickPlant(p, t = today()) {
+  let ch = false;
+  if (p.nextGoal != null && t >= p.nextFrom) { p.goal = p.nextGoal; delete p.nextGoal; delete p.nextFrom; ch = true; }
+  if (p.paused != null) {
+    if (!isFinite(p.pauseEnd)) { p.pauseEnd = Math.max(p.paused + PAUSE_MAX, t); ch = true; } // Pause von vor 2.2: läuft sanft aus
+    if (t >= p.pauseEnd) { p.paused = null; p.resumeDay = p.pauseEnd; delete p.pauseEnd; ch = true; } // kein Welk-Malus für die Pause
+  } else if (p.pauseEnd !== undefined) { delete p.pauseEnd; ch = true; }
+  return ch;
+}
+function tickAll(t = today()) { let ch = false; for (const p of state.garden.plants) if (tickPlant(p, t)) ch = true; return ch; }
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE));
@@ -171,6 +192,9 @@ function gardenSnapshot() {
       growth: Math.round(p.growth * 10) / 10,
       condition: condition(p, t), wateredToday: wateredToday(p, t),
       week: weekCount(p, t), paused: p.paused != null,
+      ...(p.paused != null && isFinite(p.pauseEnd) ? { pe: p.pauseEnd } : {}),
+      ...(p.nextGoal != null ? { ng: p.nextGoal, nf: p.nextFrom } : {}),
+      ...(p.mitFoto === false ? { hand: true } : {}),
       // Rohdaten, damit Nachbarn den Zustand auch Tage später richtig sehen (keine Namen!)
       last: p.lastWatered, planted: p.plantedDay, resume: p.resumeDay,
       days: p.days.filter((d) => d > t - 14 && d <= t),
@@ -238,8 +262,11 @@ function thirsty(p, t = today()) {
 }
 /** Gießen: einmal pro Tag. Wachstum pro Gießen = 7/Ziel, über dem Wochenziel nur ein kleiner Bonus.
     Nach langem Welken geht etwas Wachstum verloren, nie mehr als 35 %. */
+const GOAL_BONUS = { 7: 1.2, 5: 1.1 }; // 2.2: kleiner Bonus für häufige Rhythmen
+const gainOf = (g) => 7 / g * (GOAL_BONUS[g] || 1);
 function water(p, t = today()) {
-  if (wateredToday(p, t)) return null;
+  tickPlant(p, t);
+  if (wateredToday(p, t) || p.paused != null) return null;
   const c0 = condition(p, t);
   const o = overdue(p, t), ws = wiltSpan(p.goal);
   const before = stageOf(p.growth);
@@ -251,12 +278,12 @@ function water(p, t = today()) {
   }
   const wc = weekCount(p, t);
   const bonus = wc >= p.goal;
-  const gain = bonus ? 0.5 : 7 / p.goal;
+  const gain = bonus ? 0.5 : gainOf(p.goal);
   p.growth += gain;
   p.lastWatered = t;
   p.days.push(t);
   p.days = p.days.filter((d) => d > t - 63);
-  state.garden.xp += gain / Math.sqrt(Math.max(1, state.garden.plants.length));
+  state.garden.xp += gain / Math.max(1, state.garden.plants.length); // 2.2: Pflege-Anteil statt Pflanzenzahl
   const lvAfter = levelOfXp(state.garden.xp);
   return {
     revived: c0 === 2, drooped: c0 === 1, loss, bonus,
@@ -267,8 +294,8 @@ function water(p, t = today()) {
 }
 
 /* ------------------------------------------------------------------ Garten-Stufe und Deko
-   Jedes Gießen gibt Pflege (7/Ziel, geteilt durch √Pflanzenzahl). So wird auch ein kleiner Garten
-   übertrieben, ein großer nur etwas schneller. Stufe L braucht 1,6·L^1,8 Pflege
+   Jedes Gießen gibt Pflege (Wachstum, geteilt durch die Pflanzenzahl – seit 2.2, vorher √n). So zählt
+   der Anteil gepflegter Pflanzen, nicht wie viele es sind. Stufe L braucht 1,6·L^1,8 Pflege
    (1 Pflanze täglich: Stufe 5 nach ~4 Wochen, Stufe 10 nach ~14, Stufe 16 nach ~34 Wochen). */
 const LEVEL_MAX = 16;
 const DEKO = [
@@ -2142,7 +2169,7 @@ function renderLabels() {
     if (condition(p, t) === 2) cls.push('welk');
     if (p.paused != null) cls.push('pause');
     if (view) cls.push('fremd');
-    const label = view ? fremdName(p) : nameOf(p);
+    const label = view ? fremdName(p) + (p.paused != null ? ' 💤' : '') : nameOf(p); // 2.2: Pause für die Gemeinde sichtbar
     const b = el('button', { class: cls.join(' '), type: 'button', 'aria-label': view ? plantInfo(p) : `${label} – Details` }, el('span', null, label));
     b.style.left = s.cx * PX + 'px';
     b.style.top = (s.base + 10) * PX + 'px';
@@ -2251,6 +2278,8 @@ function openNew() {
     let goal = SPECIES[chosen].goal, goalTouched = false;
     const rh = rhythmPicker(() => goal, (g) => { goal = g; goalTouched = true; }, () => chosen);
     grid.addEventListener('click', () => { if (!goalTouched) { goal = SPECIES[chosen].goal; } rh.update(); });
+    let mitFoto = true;
+    const fotoSch = schalter('📸 Foto beim Gießen', () => mitFoto, (v) => { mitFoto = v; });
     const ok = el('button', { class: 'knopf haupt', type: 'button' }, 'Einpflanzen');
     const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Abbrechen');
     let gepflanzt = false;
@@ -2263,18 +2292,18 @@ function openNew() {
         return;
       }
       gepflanzt = true;
-      addPlant(name, chosen, goal);
+      addPlant(name, chosen, goal, mitFoto);
       closeSheet();
     });
     ab.addEventListener('click', closeSheet);
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') ok.click(); });
-    b.append(inp, grid, rh.node, el('div', { class: 'reihe' }, ab, ok));
+    b.append(inp, grid, rh.node, fotoSch, el('div', { class: 'reihe' }, ab, ok));
     if (!matchMedia('(pointer: coarse)').matches) setTimeout(() => inp.focus(), 60);
   });
 }
 
 /** Auswahl täglich / 5× / 3× / 2× / 1× mit verspieltem Hinweis zur Pflanzenart. */
-function rhythmPicker(get, set, species) {
+function rhythmPicker(get, set, species, note) {
   const hint = el('p', { class: 'rhythmus-hinweis' });
   const row = el('div', { class: 'rhythmen', role: 'group', 'aria-label': 'Wie oft gießen?' });
   const btns = GOALS.map((g) => {
@@ -2287,14 +2316,18 @@ function rhythmPicker(get, set, species) {
     const g = get(), sp = SPECIES[species()];
     btns.forEach((bt) => bt.setAttribute('aria-pressed', String(+bt.dataset.g === g)));
     const sug = sp.goal === g ? 'passt' : `Vorschlag: ${GOAL_SHORT[sp.goal]}`;
-    hint.textContent = `Gießen ${GOAL_LABEL[g]} · ${sp.name} ist ${sp.durst} (${sug})`;
+    const n = note && note();
+    hint.textContent = n || `Gießen ${GOAL_LABEL[g]} · ${sp.name} ist ${sp.durst} (${sug})`;
   }
   update();
   return { node: el('div', { class: 'rhythmus' }, hint, row), update };
 }
 
 function weekText(p, t) {
-  if (p.paused != null) return 'Macht gerade Pause. Welkt nicht.';
+  if (p.paused != null) {
+    const rest = isFinite(p.pauseEnd) ? p.pauseEnd - t : 0;
+    return rest > 0 ? `Macht Pause, noch ${rest === 1 ? '1 Tag' : rest + ' Tage'}. Welkt nicht.` : 'Macht gerade Pause. Welkt nicht.';
+  }
   if (p.goal >= 7) return wateredToday(p, t) ? 'Täglich · heute erledigt' : 'Täglich · heute noch offen';
   const n = weekCount(p, t);
   const drops = '💧'.repeat(Math.min(n, p.goal)) + '○'.repeat(Math.max(0, p.goal - n)) + (n > p.goal ? ' ✨' : '');
@@ -2325,7 +2358,7 @@ function openPlant(p) {
       el('p', { class: 'stimmung' }, moodText(p, st, cond, wt)));
     const g = el('button', { class: 'knopf haupt', type: 'button' }, wt ? 'Heute gegossen' : p.paused != null ? 'Macht Pause' : 'Gießen');
     g.disabled = wt || p.paused != null;
-    g.addEventListener('click', () => { closeSheet(); setTimeout(() => giessMitFoto(p), 360); });
+    g.addEventListener('click', () => { closeSheet(); setTimeout(() => giessAntippen(p), 360); });
     const area = el('div', { class: 'reihe' });
     const showButtons = () => {
       const ren = el('button', { class: 'knopf', type: 'button' }, 'Umbenennen');
@@ -2361,13 +2394,22 @@ function openPlant(p) {
       area.replaceChildren(el('p', { class: 'frage' }, `${nameOf(p)} wirklich aus dem Garten nehmen?`), no, yes);
     };
     showButtons();
-    const rh = rhythmPicker(() => p.goal, (gg) => {
-      if (gg === p.goal) return;
-      p.goal = gg; saveState(); renderLand(); updateUI();
-      b.querySelector('.woche').textContent = weekText(p, today());
-      toast(`${nameOf(p)}: jetzt ${GOAL_LABEL[gg]}.`);
-    }, () => p.species);
-    const pz = el('button', { class: 'knopf pause-knopf', type: 'button' }, p.paused != null ? 'Pause beenden' : 'Pause (Urlaub, krank …)');
+    // 2.2: Ein neuer Rhythmus gilt erst ab Montag (noch nie gegossen: sofort)
+    const rh = rhythmPicker(() => p.nextGoal != null ? p.nextGoal : p.goal, (gg) => {
+      const tt = today();
+      if (gg === (p.nextGoal != null ? p.nextGoal : p.goal)) return;
+      if (p.lastWatered == null || gg === p.goal) {
+        delete p.nextGoal; delete p.nextFrom;
+        if (gg !== p.goal) { p.goal = gg; toast(`${nameOf(p)}: jetzt ${GOAL_LABEL[gg]}.`); }
+        else toast(`${nameOf(p)}: bleibt ${GOAL_LABEL[gg]}.`);
+      } else {
+        p.nextGoal = gg; p.nextFrom = weekStart(tt) + 7;
+        toast(`${nameOf(p)}: ab Montag ${GOAL_LABEL[gg]}.`);
+      }
+      saveState(); renderLand(); updateUI();
+      b.querySelector('.woche').textContent = weekText(p, tt);
+    }, () => p.species, () => p.nextGoal != null ? `Diese Woche noch ${GOAL_LABEL[p.goal]} · ab Montag: ${GOAL_SHORT[p.nextGoal]}` : '');
+    const pz = el('button', { class: 'knopf pause-knopf', type: 'button' }, p.paused != null ? 'Pause beenden' : 'Pause (höchstens 14 Tage)');
     pz.addEventListener('click', () => {
       if (pz.dataset.done) return; // Doppeltipp-Schutz
       pz.dataset.done = '1';
@@ -2391,35 +2433,48 @@ function openPlant(p) {
     // 2.0: Sieht die Gemeinde den Namen dieser Gewohnheit? (sonst nur die Pflanzenart)
     let auge = '';
     if (NB_ON) {
-      const an = () => state.privat.sichtbar[p.id] === true;
-      const pill = el('span', { class: 'schalter-pill' });
-      auge = el('button', { class: 'schalter', type: 'button', role: 'switch' }, el('span', null, '👁 Für die Gemeinde sichtbar'), pill);
-      const zeig = () => { auge.setAttribute('aria-checked', String(an())); pill.textContent = an() ? 'an' : 'aus'; };
-      auge.addEventListener('click', () => {
-        state.privat.sichtbar[p.id] = !an();
-        saveState(); scheduleSync(true); zeig();
-        toast(an() ? 'Die Gemeinde sieht jetzt den Namen.' : 'Die Gemeinde sieht nur noch die Pflanze.');
+      auge = schalter('👁 Für die Gemeinde sichtbar', () => state.privat.sichtbar[p.id] === true, (v) => {
+        state.privat.sichtbar[p.id] = v;
+        fotoSichtbarkeit(p.id); // 2.2: Foto einer versteckten Gewohnheit bleibt privat
+        saveState(); scheduleSync(true);
+        toast(v ? 'Die Gemeinde sieht jetzt Name und Foto.' : 'Die Gemeinde sieht nur noch die Pflanze. Fotos bleiben bei dir.');
       });
-      zeig();
     }
-    b.append(el('div', { class: 'pflanze-kopf' }, prev, info), el('div', { class: 'reihe' }, g), rh.node, el('div', { class: 'reihe' }, pz), fotoRow, auge, area);
+    // 2.2: Foto beim Gießen – pro Gewohnheit abschaltbar
+    const mitFoto = schalter('📸 Foto beim Gießen', () => p.mitFoto !== false, (v) => {
+      if (v) delete p.mitFoto; else p.mitFoto = false;
+      saveState();
+      toast(v ? 'Gegossen wird mit Foto.' : 'Gegossen wird mit einem Tipp, ohne Foto.');
+    });
+    b.append(el('div', { class: 'pflanze-kopf' }, prev, info), el('div', { class: 'reihe' }, g), rh.node, el('div', { class: 'reihe' }, pz), fotoRow, mitFoto, auge, area);
   });
+}
+
+/** Schlichter An/Aus-Schalter (wie „Für die Gemeinde sichtbar“). */
+function schalter(text, get, set) {
+  const pill = el('span', { class: 'schalter-pill' });
+  const btn = el('button', { class: 'schalter', type: 'button', role: 'switch' }, el('span', null, text), pill);
+  const zeig = () => { btn.setAttribute('aria-checked', String(get())); pill.textContent = get() ? 'an' : 'aus'; };
+  btn.addEventListener('click', () => { set(!get()); zeig(); });
+  zeig();
+  return btn;
 }
 
 function togglePause(p) {
   const t = today();
   if (p.paused != null) {
-    p.paused = null; p.resumeDay = t;
+    p.paused = null; p.resumeDay = t; delete p.pauseEnd;
     toast(`${nameOf(p)} ist wieder wach.`);
   } else {
-    p.paused = t;
-    toast(`${nameOf(p)} macht Pause und welkt nicht.`);
+    p.paused = t; p.pauseEnd = t + PAUSE_MAX;
+    toast(`${nameOf(p)} macht bis zu 14 Tage Pause und welkt nicht.`);
   }
   saveState();
   renderLand(); updateUI();
 }
-function addPlant(name, sp, goal) {
+function addPlant(name, sp, goal, mitFoto = true) {
   const p = migratePlant({ id: uid(), species: sp, plantedDay: today(), lastWatered: null, growth: 0, goal: goal || SPECIES[sp].goal });
+  if (!mitFoto) p.mitFoto = false;
   state.garden.plants.push(p);
   state.privat.names[p.id] = name;
   state.privat.sichtbar[p.id] = true; // 2.0: neue Gewohnheiten sieht die Gemeinde (im Blatt abschaltbar)
@@ -2443,6 +2498,7 @@ function removePlant(p) {
 }
 
 function refresh() {
+  if (state && tickAll()) saveState();
   layout();
   renderLayers();
   updateUI();
@@ -2469,7 +2525,7 @@ canvas.addEventListener('click', (e) => {
   if (view) { toast(plantInfo(s.p)); return; } // Nachbargarten: nur ansehen, nie gießen
   if (cans.some((k) => k.s.p.id === s.p.id)) return;
   if (wateredToday(s.p) || s.p.paused != null) openPlant(s.p);
-  else giessMitFoto(s.p); // 1.5.1: gegossen wird immer erst mit Foto
+  else giessAntippen(s.p); // 1.5.1: mit Foto; 2.2: ohne Foto, wenn bei dieser Gewohnheit abgeschaltet
 });
 canvas.addEventListener('mousemove', (e) => { canvas.classList.toggle('zeiger', !!plantAt(e)); });
 
@@ -2512,6 +2568,7 @@ function simulateWeeks(n) {
     dayOffset++;
     const t = today(), wd = weekday(t);
     for (const p of state.garden.plants) {
+      tickPlant(p, t);
       if (p.paused != null) continue;
       if (GOAL_DAYS[p.goal].includes(wd)) water(p, t);
     }
@@ -2839,6 +2896,10 @@ function sanitizeSnap(s) {
     resume: p.resume == null ? null : Math.round(num(p.resume, day)),
     days: (Array.isArray(p.days) ? p.days : []).slice(-14).filter((d) => typeof d === 'number' && isFinite(d)).map(Math.round),
     paused: !!p.paused,
+    pe: typeof p.pe === 'number' && isFinite(p.pe) ? Math.round(p.pe) : null,
+    ng: GOALS.includes(p.ng) && typeof p.nf === 'number' && isFinite(p.nf) ? p.ng : null,
+    nf: typeof p.nf === 'number' && isFinite(p.nf) ? Math.round(p.nf) : null,
+    hand: p.hand === true,
     name: cleanName(p.name).slice(0, 30) || null,
     foto: sanitizeFoto(p.foto)
   }));
@@ -2851,8 +2912,10 @@ function buildView(id) {
   const plants = snap.plants.map((p) => ({
     id: p.id, species: p.species, goal: p.goal, growth: p.growth,
     lastWatered: p.last, plantedDay: p.planted, resumeDay: p.resume, days: p.days.slice(),
-    paused: p.paused ? snap.day : null, nb: true, foto: p.foto || null, name: p.name || null
+    paused: p.paused ? snap.day : null, nb: true, foto: p.foto || null, name: p.name || null, hand: p.hand,
+    ...(p.pe != null ? { pauseEnd: p.pe } : {}), ...(p.ng != null ? { nextGoal: p.ng, nextFrom: p.nf } : {})
   }));
+  for (const p of plants) tickPlant(p); // 2.2: Pause/Rhythmus so, wie sie heute wirklich sind
   return { id, name: (c && c.name) || 'Garten', level: snap.level, plants, at: c ? c.at : null, loaded: !!c };
 }
 function gardenStatus(plants, t = today()) {
@@ -2874,7 +2937,7 @@ function agoText(iso) {
   return `zuletzt aktiv vor ${d} ${d === 1 ? 'Tag' : 'Tagen'}`;
 }
 const fremdName = (p) => p.name || SPECIES[p.species].name; // Nachbar-Pflanze: Gewohnheit, falls geteilt
-function plantInfo(p) { return `${p.name ? p.name + ' · ' : ''}${SPECIES[p.species].name} · ${stageName(p.species, stageOf(p.growth))}${p.paused != null ? ' · Pause' : ''}`; }
+function plantInfo(p) { return `${p.name ? p.name + ' · ' : ''}${SPECIES[p.species].name} · ${stageName(p.species, stageOf(p.growth))}${p.paused != null ? ' · Pause 💤' : ''}${p.hand ? ' · ✋' : ''}`; }
 
 /* ---------- Gartenzaun-Ansicht: eigener Garten + Nachbarn ---------- */
 let viewIdx = 0;
@@ -3130,7 +3193,7 @@ async function widgetEinrichten() {
     b.append(el('div', { class: 'blatt-kopf' }, pixelText('Widget', 3)),
       el('p', { class: 'stimmung' }, ok ? 'Das Widget-Skript ist kopiert. 📋' : 'Kopieren hat nicht geklappt – versuch es bitte nochmal.'),
       schritte,
-      el('p', { class: 'stimmung leise' }, 'Das Widget zeigt, wer Wasser braucht. Antippen öffnet den Garten – gegossen wird erst mit Foto. Neue Pflanzen? Einfach nochmal einrichten.'),
+      el('p', { class: 'stimmung leise' }, 'Das Widget zeigt, wer Wasser braucht. Antippen öffnet den Garten, dort wird gegossen. Neue Pflanzen? Einfach nochmal einrichten.'),
       el('div', { class: 'reihe' }, app, zu));
   });
 }
@@ -3677,6 +3740,24 @@ function queueFotoDelete(pid) {
   nb.fotoDel = (Array.isArray(nb.fotoDel) ? nb.fotoDel : []).filter((x) => x !== pid).concat(pid).slice(-60);
 }
 
+/** 2.2: Fotos von Gewohnheiten, die die Gemeinde nicht sieht, bleiben auf dem Gerät. */
+const fotoPrivat = (pid) => state.privat.sichtbar[pid] !== true;
+/** Sichtbarkeit umgeschaltet: unsichtbar -> geteiltes Foto vom Server löschen (hier behalten);
+    sichtbar -> ein frisches Foto darf jetzt geteilt werden. */
+function fotoSichtbarkeit(pid) {
+  const m = fotosLoaded && fotoIdx.get(pid);
+  if (!m) return;
+  if (fotoPrivat(pid)) {
+    if (m.synced) queueFotoDelete(pid);
+    m.synced = false; m.local = true;
+  } else {
+    if (!sharing() || !fotoFresh(m.day) || (m.synced && !m.local)) return;
+    m.local = false; m.synced = false;
+  }
+  fotoPutMeta(m).catch(() => {});
+  renderLabels();
+  setTimeout(syncFotos, 0);
+}
 /** Foto einer Pflanze (eigene: aus fotoIdx, Nachbar: aus dem Schnappschuss) – nur wenn jünger als 7 Tage. */
 function fotoOf(p) {
   if (p.nb) return p.foto && fotoFresh(p.foto.d) ? p.foto : null;
@@ -3795,7 +3876,28 @@ function handleGiessParam() {
   const t = today();
   if (wateredToday(p, t)) { toastLater(`${nameOf(p)} ist heute schon gegossen.`); return; }
   if (p.paused != null) { toastLater(`${nameOf(p)} macht gerade Pause.`); return; }
-  giessMitFoto(p);
+  if (p.mitFoto === false) giessBlatt(p); else giessMitFoto(p);
+}
+/** Tipp auf die Pflanze: mit Foto-Nachweis oder (2.2, pro Gewohnheit abgeschaltet) direkt gießen. */
+function giessAntippen(p) {
+  if (p.mitFoto === false) giessen(p); else giessMitFoto(p);
+}
+/** 2.2: Widget-Link bei einer Gewohnheit ohne Foto – ein Tipp auf „Gießen“ (das Widget gießt nie selbst). */
+function giessBlatt(p) {
+  if (view || wateredToday(p) || p.paused != null) return;
+  openSheet((b) => {
+    b.setAttribute('aria-label', 'Gießen');
+    const ok = el('button', { class: 'knopf haupt', type: 'button' }, 'Gießen');
+    const ab = el('button', { class: 'knopf leise', type: 'button' }, 'Später');
+    ok.addEventListener('click', () => {
+      if (ok.dataset.done) return; ok.dataset.done = '1';
+      closeSheet(); setTimeout(() => giessen(p), 360);
+    });
+    ab.addEventListener('click', closeSheet);
+    b.append(el('div', { class: 'blatt-kopf' }, pixelText('Gießen', 3)),
+      el('p', { class: 'stimmung' }, `${nameOf(p)} hat Durst.`),
+      el('div', { class: 'reihe' }, ab, ok));
+  });
 }
 /** Gießen geht nur mit Foto-Nachweis (Kamera oder Fotos). Ohne Foto bleibt die Pflanze ungegossen. */
 function giessMitFoto(p) {
@@ -3830,7 +3932,7 @@ function fotoStart(p, gallery) {
     fotoInput.value = '';
     fotoInput.click();
   };
-  if (sharing() && !state.privat.fotoHinweis) {
+  if (sharing() && !state.privat.fotoHinweis && !fotoPrivat(p.id)) {
     openSheet((b) => {
       b.setAttribute('aria-label', 'Foto-Nachweis');
       const ok = el('button', { class: 'knopf haupt', type: 'button' }, 'Verstanden');
@@ -3862,11 +3964,13 @@ async function takeFoto(file, pid) {
   toast('Foto wird entwickelt …');
   try {
     const f = await makeFoto(file);
-    const meta = { plant: pid, day: today(), mime: f.mime, thumb: f.thumb, size: f.data.length, synced: false, local: !sharing() };
+    const privat = fotoPrivat(pid), alt = fotoIdx.get(pid);
+    const meta = { plant: pid, day: today(), mime: f.mime, thumb: f.thumb, size: f.data.length, synced: false, local: !sharing() || privat };
+    if (privat && alt && alt.synced) queueFotoDelete(pid); // altes geteiltes Foto nicht stehen lassen
     await fotoPut(meta, f.data);
     fotoIdx.set(pid, meta);
     const nb = nbData();
-    if (Array.isArray(nb.fotoDel)) nb.fotoDel = nb.fotoDel.filter((x) => x !== pid);
+    if (!privat && Array.isArray(nb.fotoDel)) nb.fotoDel = nb.fotoDel.filter((x) => x !== pid);
     renderLabels();
     if (sharing()) syncFotos();
     if (fotoDannGiessen === pid) { // Widget-Ablauf: erst Foto, dann gießen
@@ -3907,7 +4011,7 @@ async function syncFotos() {
       changed = true;
     }
     for (const [pid, m] of [...fotoIdx]) {
-      if (m.synced || m.local || !fotoFresh(m.day) || !state.garden.plants.some((x) => x.id === pid)) continue;
+      if (m.synced || m.local || fotoPrivat(pid) || !fotoFresh(m.day) || !state.garden.plants.some((x) => x.id === pid)) continue;
       const rec = await fotoBild(pid);
       if (!rec || !rec.data) continue;
       await backend.putFoto(state.garden.id, nb.token, pid, m.day, m.mime, rec.data);
@@ -4454,7 +4558,7 @@ function init() {
   setInterval(() => {
     if (document.hidden) return;
     const m = Math.floor(currentHour() * 60);
-    if (today() !== lastDay) { lastDay = today(); renderLayers(); updateUI(); }
+    if (today() !== lastDay) { lastDay = today(); refresh(); }
     else if (m !== lastMin) { lastMin = m; if (!cans.length) { renderLayers(); updateUI(); } }
   }, 30000);
 
